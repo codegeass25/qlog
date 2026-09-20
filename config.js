@@ -7,6 +7,10 @@
   var configured = (window.QLOG_CONFIG && window.QLOG_CONFIG.apiBase) || DEFAULT_API_BASE;
   var base = String(configured || DEFAULT_API_BASE).trim().replace(/\/+$/, '');
   window.QLOG_API_BASE = base;
+  window.QLOG_API_CANDIDATES = Array.from(new Set([
+    base,
+    'https://qlog-api.mdmsportal.uk'
+  ].filter(Boolean)));
   window.qlogApiUrl = function (path) {
     var value = String(path == null ? '' : path).trim();
     if (/^https?:\/\//i.test(value)) return value;

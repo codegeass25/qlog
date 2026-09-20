@@ -8,17 +8,24 @@
    - Never touches localStorage: server data is centralized in SQLite; localStorage is only an offline cache mirror.
    ===================================================================== */
 
-const CACHE_NAME = "qlogpro-central-v7-profile-sync-visitor-ocr";
+const CACHE_NAME = "qlogpro-central-v13-github-central-livefix-20260921";
 
 const PRECACHE_URLS = [
   "./",
   "./index.html",
+  "./central.html",
   "./manifest.json",
   "./config.js",
   "./install-gate.js",
   "./central-client.js",
-  "./equipment-module.js",
   "./visitor-advanced-module.js",
+  "./qlog-export-helper.js",
+  "./qlog-clearance.js",
+  "./qlog-scope.js",
+  "./qlog-ui-overhaul.css",
+  "./qlog-ui-overhaul.js",
+  "./qlog-central-policy.js",
+  "./libs/jszip.min.js",
   "./libs/onnx/ort.wasm.min.js",
   "./libs/onnx/ort-wasm-simd-threaded.mjs",
   "./libs/onnx/ort-wasm-simd-threaded.wasm",
@@ -137,26 +144,29 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Navigations: network-first (fresh deploys), always fall back to the cached shell.
+  // Navigations: network-first. Keep Central Hub and the user app as separate cached documents.
   if (request.mode === "navigate") {
     event.respondWith(
       (async () => {
+        const isCentral = /\/central\.html$/i.test(url.pathname);
+        const navFallback = isCentral ? "./central.html" : OFFLINE_SHELL;
         try {
           const preload = await event.preloadResponse;
           if (preload) {
             const cache = await caches.open(CACHE_NAME);
-            cache.put(OFFLINE_SHELL, preload.clone());
+            cache.put(navFallback, preload.clone());
             return preload;
           }
           const fresh = await fetch(request);
           if (fresh && fresh.ok) {
             const cache = await caches.open(CACHE_NAME);
-            cache.put(OFFLINE_SHELL, fresh.clone());
+            cache.put(navFallback, fresh.clone());
           }
           return fresh;
         } catch (e) {
           const cache = await caches.open(CACHE_NAME);
           return (
+            (await cache.match(navFallback)) ||
             (await cache.match(OFFLINE_SHELL)) ||
             (await cache.match("./")) ||
             new Response(

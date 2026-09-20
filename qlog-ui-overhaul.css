@@ -1,0 +1,55 @@
+/* =====================================================================
+   QLog Pro — Classic UI compatibility layer
+   Keeps the ORIGINAL QLog page/nav/card layout intact.
+   This file styles only the added Settings feature and does not alter
+   the original workspace, tables, cards, navigation, or modal layout.
+   ===================================================================== */
+
+.qlog-classic-settings-menu{
+  display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px;
+}
+.qlog-classic-settings-menu button{
+  margin:0;background:#64748b;
+}
+.qlog-classic-settings-menu button.active{
+  background:#2563eb;
+}
+.qlog-classic-settings-panel{display:none;}
+.qlog-classic-settings-panel.active{display:block;}
+.qlog-classic-form-grid{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;
+}
+.qlog-classic-form-grid .full{grid-column:1/-1;}
+.qlog-classic-form-grid label{
+  display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:4px;
+}
+.qlog-classic-form-grid input,.qlog-classic-form-grid select{width:100%;margin:0;}
+.qlog-classic-brand-preview{
+  display:flex;align-items:center;gap:12px;padding:12px;border:1px solid #e2e8f0;
+  border-radius:12px;background:#f8fafc;margin-bottom:14px;
+}
+.qlog-classic-brand-preview img{
+  width:64px;height:64px;object-fit:contain;border-radius:10px;background:#fff;border:1px solid #e2e8f0;display:none;
+}
+.qlog-classic-brand-preview.has-logo img{display:block;}
+.qlog-classic-brand-preview h4{margin:0 0 3px;}
+.qlog-classic-brand-preview p{margin:2px 0;font-size:12px;color:#64748b;}
+.qlog-classic-fixed-brand{
+  padding:10px 12px;border-left:4px solid #2563eb;background:#eff6ff;color:#1e3a8a;border-radius:8px;
+  font-size:12.5px;line-height:1.5;
+}
+.qlog-classic-scope-grid{
+  display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0 14px;
+}
+.qlog-classic-scope-item{
+  border:1px solid #e2e8f0;border-radius:10px;padding:10px;background:#f8fafc;
+}
+.qlog-classic-scope-item span{display:block;font-size:11px;color:#64748b;margin-bottom:3px;}
+.qlog-classic-scope-item b{font-size:13px;color:#0f172a;}
+.qlog-classic-credit{font-size:11px;color:#64748b;margin-top:14px;text-align:center;}
+@media(max-width:700px){
+  .qlog-classic-form-grid{grid-template-columns:1fr;}
+  .qlog-classic-form-grid .full{grid-column:auto;}
+  .qlog-classic-scope-grid{grid-template-columns:1fr 1fr;}
+}
+@media(max-width:460px){.qlog-classic-scope-grid{grid-template-columns:1fr;}}

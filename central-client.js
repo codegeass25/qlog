@@ -7,6 +7,7 @@
   'use strict';
 
   var API_BASE = String(window.QLOG_API_BASE || localStorage.getItem('qlogApiUrl') || 'https://qlog-upgraded.mdmsportal.uk').replace(/\/$/, '');
+  var API_CANDIDATES = Array.from(new Set(([API_BASE].concat(window.QLOG_API_CANDIDATES||[])).map(function(v){return String(v||'').trim().replace(/\/$/,'');}).filter(Boolean)));
   var TOKEN_KEY = 'qlogCentralToken';
   var SOURCE_KEY = 'qlogCentralSourceId';
   var ACCESS_HINT_KEY = 'qlogCentralConnectedAt';
@@ -19,9 +20,12 @@
   var RESET_HOLD_KEY = 'qlogCentralResetHold::';
   var DELETE_QUEUE_PREFIX = 'qlogCentralDeleteQueue::';
   var PENDING_PREFIX = 'qlogCentralPending::';
+  var OFFLINE_QUEUE_PREFIX = 'qlogCentralOfflineQueue::';
+  var VISITOR_FACE_CACHE_KEY = 'qlogCentralVisitorFaceDirectoryV1';
 
-  var SYNC_KEYS = ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','configData','dynamicFilterData','borrowPolicies'];
-  var PROFILE_DATASETS = ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs'];
+  var SYNC_KEYS = ['logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','configData','dynamicFilterData','borrowPolicies','clearances'];
+  var SCHOOL_WIDE_DATASETS = ['logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','clearances'];
+  var PROFILE_DATASETS = ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','clearances'];
   var GLOBAL_DATASETS = ['configData','dynamicFilterData','borrowPolicies'];
 
   var statusTimer = null;
@@ -39,7 +43,13 @@
     authInFlight: false,
     reconciling: false,
     switchingProfile: false,
-    socket: null
+    socket: null,
+    serverReady: false,
+    healthTimer: null,
+    allowOfflineFlush: false,
+    lastFullPullAt: 0,
+    initialSyncNoticeShown: false,
+    lastSuccessReceipt: ''
   };
 
   function makeSourceId(){
@@ -73,9 +83,87 @@
   function savePending(scope,p){ try{localStorage.setItem(pendingKey(scope),JSON.stringify(Array.from(p||[])));}catch(e){} }
   function clearPending(scope){ try{localStorage.removeItem(pendingKey(scope));}catch(e){} }
 
-  function setStatus(text,kind){
+  function offlineQueueKey(scope){return OFFLINE_QUEUE_PREFIX+hashScope(scope);}
+  function loadOfflineQueue(scope){try{var q=JSON.parse(localStorage.getItem(offlineQueueKey(scope))||'[]');return Array.isArray(q)?q:[];}catch(e){return [];}}
+  function saveOfflineQueue(scope,q){try{localStorage.setItem(offlineQueueKey(scope),JSON.stringify(Array.isArray(q)?q:[]));}catch(e){}}
+  function hasOfflineQueue(scope){return loadOfflineQueue(scope||currentScope()).length>0;}
+  function stableId(){try{if(crypto&&crypto.randomUUID)return 'SYNC-'+crypto.randomUUID();}catch(e){}return 'SYNC-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,12);}
+  function ensureStableIds(dataset,value){
+    if(!Array.isArray(value)||['logs','borrowLogs','reservations','auditLogs','equipLogs','clearances'].indexOf(dataset)===-1)return value;
+    value.forEach(function(o){if(o&&typeof o==='object'&&!o._syncId)o._syncId=stableId();});
+    return value;
+  }
+  function syncWindowArray(dataset,value){
+    if(!Array.isArray(value))return;
+    try{
+      if(dataset==='logs')window.logs=value; else if(dataset==='books')window.books=value; else if(dataset==='borrowLogs')window.borrowLogs=value;
+      else if(dataset==='reservations')window.reservations=value; else if(dataset==='auditLogs')window.auditLogs=value;
+      else if(dataset==='equipment')window.equipment=value; else if(dataset==='equipLogs')window.equipLogs=value;
+    }catch(e){}
+  }
+  function offlineLabel(dataset,obj){
+    obj=obj||{};var name=obj.name||obj.learnerName||obj.borrowerName||obj.teacherName||obj.title||obj.eqName||obj.action||obj.id||obj.isbn||obj.eqId||'';
+    var status=obj.s||obj.status||obj.category||'';return [dataset,name,status].filter(Boolean).join(' • ');
+  }
+  function queueOfflineDifference(dataset,before,after){
+    if(['logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','clearances'].indexOf(dataset)===-1)return;
+    var q=loadOfflineQueue(currentScope()),oldMap={},newMap={};
+    if(Array.isArray(before))before.forEach(function(o,i){oldMap[recordIdentity(dataset,o,i)]=o;});
+    if(Array.isArray(after))after.forEach(function(o,i){newMap[recordIdentity(dataset,o,i)]=o;});
+    var ids={};Object.keys(oldMap).concat(Object.keys(newMap)).forEach(function(id){ids[id]=true;});
+    Object.keys(ids).forEach(function(id){
+      var b=Object.prototype.hasOwnProperty.call(oldMap,id)?oldMap[id]:null,a=Object.prototype.hasOwnProperty.call(newMap,id)?newMap[id]:null;
+      if(JSON.stringify(b)===JSON.stringify(a))return;
+      var op=!b?'ADD':(!a?'DELETE':'UPDATE');
+      var existing=q.findIndex(function(x){return x.dataset===dataset&&x.identity===id;});
+      var item={id:dataset+'|'+id,dataset:dataset,identity:id,operation:op,before:b,after:a,at:new Date().toISOString(),label:offlineLabel(dataset,a||b)};
+      if(existing>=0){item.before=q[existing].before;q[existing]=item;}else q.push(item);
+    });
+    saveOfflineQueue(currentScope(),q);
+  }
+  function applyOfflineQueueToLocal(q){
+    (q||[]).forEach(function(item){
+      var arr=collectDataset(item.dataset);if(!Array.isArray(arr))return;
+      arr=arr.slice();var idx=arr.findIndex(function(o,i){return recordIdentity(item.dataset,o,i)===item.identity;});
+      if(item.after==null){if(idx>=0)arr.splice(idx,1);}else if(idx>=0)arr[idx]=item.after;else arr.push(item.after);
+      setDatasetLocal(item.dataset,arr,true);
+    });
+  }
+  function discardOfflineItem(id){
+    var q=loadOfflineQueue(currentScope()),item=q.find(function(x){return x.id===id;});if(!item)return;
+    var arr=collectDataset(item.dataset);if(Array.isArray(arr)){
+      arr=arr.slice();var idx=arr.findIndex(function(o,i){return recordIdentity(item.dataset,o,i)===item.identity;});
+      if(item.before==null){if(idx>=0)arr.splice(idx,1);}else if(idx>=0)arr[idx]=item.before;else arr.push(item.before);
+      setDatasetLocal(item.dataset,arr,true);
+    }
+    q=q.filter(function(x){return x.id!==id;});saveOfflineQueue(currentScope(),q);renderOfflineQueue();refreshUi();
+  }
+  function renderOfflineQueue(){
+    var body=document.getElementById('qlogOfflineQueueBody'),count=document.getElementById('qlogOfflineQueueCount');if(!body)return;
+    var q=loadOfflineQueue(currentScope());if(count)count.textContent=String(q.length);
+    body.innerHTML=q.length?q.map(function(x){var detail='';try{detail=JSON.stringify(x.after||x.before||{}).slice(0,260);}catch(e){}return '<div style="border:1px solid #e2e8f0;border-radius:12px;padding:10px;margin:8px 0;background:#f8fafc"><div style="display:flex;gap:8px;align-items:flex-start"><div style="flex:1"><b>'+escapeHtml(x.operation)+' · '+escapeHtml(x.label||x.dataset)+'</b><div style="font-size:11px;color:#64748b;margin-top:4px;word-break:break-word">'+escapeHtml(detail)+'</div></div><button type="button" style="background:#dc2626;flex:0 0 auto" onclick="QLogCentral.discardOfflineItem(\''+String(x.id).replace(/'/g,"\\'")+'\')">Delete</button></div></div>';}).join(''):'<div style="padding:16px;color:#166534;font-weight:700">No pending offline transactions.</div>';
+  }
+  function escapeHtml(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+  function showOfflineReview(){injectUI();renderOfflineQueue();var m=document.getElementById('qlogOfflineReviewModal');if(m)m.style.display='flex';}
+  function closeOfflineReview(){var m=document.getElementById('qlogOfflineReviewModal');if(m)m.style.display='none';}
+  async function syncReviewedOffline(){
+    var q=loadOfflineQueue(currentScope());if(!q.length){closeOfflineReview();return true;}
+    if(!navigator.onLine||!state.token){setStatus('Connect to Central before syncing reviewed offline data','warn');return false;}
+    var names=Array.from(new Set(q.map(function(x){return x.dataset;})));
+    state.allowOfflineFlush=true;
+    try{names.forEach(function(n){state.pending.add(n);});savePending(currentScope(),state.pending);var ok=await sync(false);if(ok){saveOfflineQueue(currentScope(),[]);closeOfflineReview();saveProfileCache(currentScope());setStatus('Reviewed offline transactions synced to Central','ok');return true;}return false;}
+    finally{state.allowOfflineFlush=false;}
+  }
+
+  function setStatus(text,kind,options){
     var el=document.getElementById('qlogCentralStatus');
     if(!el)return;
+    options=options||{};
+    var receipt=(kind||'idle')+'|'+String(text||'');
+    // Success notices are event receipts, not a heartbeat. Never re-show the
+    // exact same success message just because the 4s/30s reconcile timer ran.
+    if((kind||'')==='ok' && !options.force && state.lastSuccessReceipt===receipt) return;
+    if((kind||'')==='ok') state.lastSuccessReceipt=receipt;
     if(statusTimer) clearTimeout(statusTimer);
     el.textContent=text;
     el.dataset.kind=kind||'idle';
@@ -89,7 +177,7 @@
   function injectUI(){
     if(document.getElementById('qlogCentralStatus')) return;
     var style=document.createElement('style');
-    style.textContent='.qlog-central-status{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(14px);z-index:99999;padding:9px 14px;border-radius:999px;background:#0f172a;color:#fff;font:600 12px/1.2 Inter,Arial,sans-serif;box-shadow:0 4px 18px rgba(15,23,42,.2);opacity:0;pointer-events:none;transition:opacity .2s ease,transform .2s ease}.qlog-central-status.show{opacity:.96;transform:translateX(-50%) translateY(0)}.qlog-central-status[data-kind="ok"]{background:#166534}.qlog-central-status[data-kind="warn"]{background:#a16207}.qlog-central-status[data-kind="err"]{background:#b91c1c}.qlog-central-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(15,23,42,.55);z-index:100000;padding:20px}.qlog-central-card{width:min(460px,100%);background:#fff;border-radius:18px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.25);font-family:Inter,Arial,sans-serif;color:#0f172a}.qlog-central-card h3{margin:0 0 8px}.qlog-central-card p{color:#475569;font-size:13px;line-height:1.5}.qlog-central-card input{width:100%;box-sizing:border-box;margin-top:10px}.qlog-central-card .actions{display:flex;gap:10px;margin-top:14px}.qlog-central-card button{flex:1}';
+    style.textContent='.qlog-central-status{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(14px);z-index:99999;padding:9px 14px;border-radius:999px;background:#0f172a;color:#fff;font:600 12px/1.2 Inter,Arial,sans-serif;box-shadow:0 4px 18px rgba(15,23,42,.2);opacity:0;pointer-events:none;transition:opacity .2s ease,transform .2s ease}.qlog-central-status.show{opacity:.96;transform:translateX(-50%) translateY(0)}.qlog-central-status[data-kind="ok"]{background:#166534}.qlog-central-status[data-kind="warn"]{background:#a16207}.qlog-central-status[data-kind="err"]{background:#b91c1c}.qlog-central-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(15,23,42,.55);z-index:100000;padding:20px}.qlog-central-card{width:min(460px,100%);background:#fff;border-radius:18px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.25);font-family:Inter,Arial,sans-serif;color:#0f172a}.qlog-central-card h3{margin:0 0 8px}.qlog-central-card p{color:#475569;font-size:13px;line-height:1.5}.qlog-central-card input{width:100%;box-sizing:border-box;margin-top:10px}.qlog-central-card .actions{display:flex;gap:10px;margin-top:14px}.qlog-central-card button{flex:1}.qlog-offline-card{width:min(760px,100%);max-height:88vh;overflow:auto}.qlog-offline-actions{display:flex;gap:10px;position:sticky;bottom:-22px;background:#fff;padding:12px 0 0}';
     document.head.appendChild(style);
     var status=document.createElement('div');
     status.id='qlogCentralStatus';
@@ -101,6 +189,10 @@
     modal.className='qlog-central-modal';
     modal.innerHTML='<div class="qlog-central-card"><h3>🔐 Connect to Central Database</h3><p>Central data is anchored to the authenticated In-Charge profile and assigned office/laboratory. This device can only fetch records for the profile shown below.</p><div id="qlogCentralProfile" style="margin:10px 0;padding:10px;background:#f1f5f9;border-radius:10px;font-size:13px;font-weight:700;"></div><input id="qlogCentralCode" type="password" autocomplete="off" placeholder="Office Access Code"><div id="qlogCentralAuthError" style="min-height:18px;color:#b91c1c;font-size:12px;margin-top:7px"></div><div class="actions"><button type="button" style="background:#64748b" onclick="window.QLogCentral.closeAuth()">Not now</button><button type="button" onclick="window.QLogCentral.connect()">Connect</button></div></div>';
     document.body.appendChild(modal);
+    var offline=document.createElement('div');
+    offline.id='qlogOfflineReviewModal'; offline.className='qlog-central-modal';
+    offline.innerHTML='<div class="qlog-central-card qlog-offline-card"><h3>🔄 Review Offline Transactions (<span id="qlogOfflineQueueCount">0</span>)</h3><p>These records were created or changed while Central was unavailable. Review them first. Delete any incorrect transaction before the final sync.</p><div id="qlogOfflineQueueBody"></div><div class="qlog-offline-actions"><button type="button" style="background:#64748b" onclick="QLogCentral.closeOfflineReview()">Review later</button><button type="button" onclick="QLogCentral.syncReviewedOffline()">Sync Reviewed Data Now</button></div></div>';
+    document.body.appendChild(offline);
   }
   function openAuth(){
     injectUI();
@@ -110,10 +202,50 @@
   }
   function closeAuth(){ var m=document.getElementById('qlogCentralAuthModal'); if(m)m.style.display='none'; }
   function headers(){ var h={'Content-Type':'application/json'}; if(state.token)h.Authorization='Bearer '+state.token; return h; }
+  function emitLiveStatus(){
+    try{window.dispatchEvent(new CustomEvent('qlog-live-status'));}catch(e){}
+  }
+  function setServerReady(value){
+    var next=!!value;
+    if(state.serverReady!==next){state.serverReady=next;emitLiveStatus();}
+    else state.serverReady=next;
+  }
+  async function checkServerHealth(timeoutMs){
+    timeoutMs=Math.max(1000,Number(timeoutMs)||4500);
+    if(!navigator.onLine){setServerReady(false);return false;}
+    var candidates=API_CANDIDATES.slice();
+    if(candidates.indexOf(API_BASE)!==0){candidates=candidates.filter(function(v){return v!==API_BASE;});candidates.unshift(API_BASE);}
+    for(var ci=0;ci<candidates.length;ci++){
+      var candidate=candidates[ci];
+      var controller=(typeof AbortController==='function')?new AbortController():null;
+      var timeoutHandle=null;
+      try{
+        var opts={cache:'no-store'};
+        if(controller){opts.signal=controller.signal;timeoutHandle=setTimeout(function(){try{controller.abort();}catch(e){}},timeoutMs);}
+        var res=await fetch(candidate+'/api/health',opts);
+        if(timeoutHandle)clearTimeout(timeoutHandle);
+        if(res&&res.ok){
+          API_BASE=candidate;
+          window.QLOG_API_BASE=candidate;
+          try{localStorage.setItem('qlogApiUrl',candidate);}catch(e){}
+          setServerReady(true);
+          return true;
+        }
+      }catch(e){ if(timeoutHandle)clearTimeout(timeoutHandle); }
+    }
+    setServerReady(false);return false;
+  }
   async function api(path,options){
     var opts=options||{};
     opts.headers=Object.assign(headers(),opts.headers||{});
-    var res=await fetch(API_BASE+path,opts);
+    var res;
+    try{
+      res=await fetch(API_BASE+path,opts);
+      setServerReady(true);
+    }catch(e){
+      setServerReady(false);
+      throw e;
+    }
     var data=null; try{data=await res.json();}catch(e){}
     if(!res.ok){var err=new Error(data&&data.error?data.error:('HTTP '+res.status));err.status=res.status;err.data=data;throw err;}
     return data;
@@ -143,6 +275,7 @@
     if(name==='auditLogs')return Array.isArray(window.auditLogs)?window.auditLogs:[];
     if(name==='equipment')return dedupeLocal(name,Array.isArray(window.equipment)?window.equipment:[]);
     if(name==='equipLogs')return Array.isArray(window.equipLogs)?window.equipLogs:[];
+    if(name==='clearances'){try{return JSON.parse(localStorage.getItem('clearances')||'[]')||[];}catch(e){return [];}}
     if(name==='configData')return window.configData||{};
     if(name==='dynamicFilterData')return window.dynamicFilterData||{};
     if(name==='borrowPolicies')return window.borrowPolicies||{};
@@ -161,6 +294,7 @@
       else if(name==='auditLogs')window.auditLogs=Array.isArray(value)?value:[];
       else if(name==='equipment')window.equipment=Array.isArray(value)?value:[];
       else if(name==='equipLogs')window.equipLogs=Array.isArray(value)?value:[];
+      else if(name==='clearances'){}
       else if(name==='configData')window.configData=value||{};
       else if(name==='dynamicFilterData')window.dynamicFilterData=value||{};
       else if(name==='borrowPolicies')window.borrowPolicies=value||{};
@@ -187,12 +321,14 @@
 
   function recordIdentity(dataset,o,index){
     o=o||{};
+    if(o._syncId)return String(o._syncId);
     if(dataset==='people'||dataset==='books'||dataset==='equipment')return String(o.id||o.isbn||o.ISBN||o.assetNo||o.asset||o.ID||dataset+':'+index);
     if(dataset==='logs')return [o.id||'',o.date||'',o.timein||'',o.category||'',o.name||''].join('|');
-    if(dataset==='borrowLogs')return [o.l||'',o.b||'',o.borrowedAt||'',o.returnedAt||'',o.s||'',o.qty||''].join('|');
-    if(dataset==='reservations')return [o.isbn||'',o.lId||o.learnerId||'',o.createdAt||o.reservedAt||'',o.status||''].join('|');
-    if(dataset==='auditLogs')return [o.timestamp||'',o.action||'',o.details||''].join('|');
+    if(dataset==='borrowLogs')return String(o.ref||[o.l||'',o.b||'',o.borrowedAt||''].join('|'));
+    if(dataset==='reservations')return String(o.id||[o.isbn||'',o.lId||o.learnerId||'',o.createdAt||o.reservedAt||''].join('|'));
+    if(dataset==='auditLogs')return String(o.id||[o.timestamp||'',o.action||'',o.details||''].join('|'));
     if(dataset==='equipLogs')return String(o.ref||[o.eqId||'',o.borrowerId||'',o.borrowedMs||''].join('|'));
+    if(dataset==='clearances')return String(o.id||[o.module||'',o.borrowerId||'',o.issuedMs||''].join('|'));
     return dataset;
   }
   function mergeProfileDatasets(dataset,rows){
@@ -236,6 +372,10 @@
     var grouped={};
     (resp.records||[]).forEach(function(r){if(SYNC_KEYS.indexOf(r.dataset)!==-1)(grouped[r.dataset] ||= []).push(r);});
     Object.keys(grouped).forEach(function(dataset){
+      // Local unsynced edits are newer from this device's point of view. Do not
+      // overwrite them with a remote delta; after direct sync succeeds the next
+      // reconcile will converge on the committed Central version.
+      if(state.pending.has(dataset)) return;
       var changes=grouped[dataset];
       if(GLOBAL_DATASETS.indexOf(dataset)!==-1){
         var latest=changes.slice().sort(function(a,b){return String(a.updatedAt||'').localeCompare(String(b.updatedAt||''));}).pop();
@@ -254,6 +394,9 @@
     });
     localStorage.setItem(reconcileKey(currentScope()),resp.serverTime||new Date().toISOString());
     refreshUi();
+    if(grouped.logs && grouped.logs.length){
+      try{window.dispatchEvent(new CustomEvent('qlog:visitor-directory-updated',{detail:{source:'reconcile',count:grouped.logs.length}}));}catch(e){}
+    }
   }
   function refreshUi(){
     try{if(typeof renderPeople==='function')renderPeople();}catch(e){}
@@ -264,6 +407,8 @@
     // Staging inputs belong to the operator session, not the synchronized dataset.
     try{if(typeof equipDup!=='undefined')equipDup={};}catch(e){}
     try{if(typeof renderBorrow==='function')renderBorrow();}catch(e){}
+    try{if(typeof renderReservations==='function')renderReservations();}catch(e){}
+    try{if(typeof applyQlogBranding==='function')applyQlogBranding();}catch(e){}
   }
 
   function deleteQueueKey(scope){ return DELETE_QUEUE_PREFIX + hashScope(scope); }
@@ -291,8 +436,9 @@
       localStorage.removeItem(RECONCILE_PREFIX+hashScope(currentScope()));
       state.pending.clear();
       window.people=[]; window.logs=[]; window.books=[]; window.borrowLogs=[]; window.reservations=[]; window.auditLogs=[]; window.equipment=[]; window.equipLogs=[];
-      ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs'].forEach(function(name){try{localStorage.setItem(name,'[]');}catch(e){}});
+      ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','clearances'].forEach(function(name){try{localStorage.setItem(name,'[]');}catch(e){}});
       clearDeleteQueue(currentScope());
+      saveOfflineQueue(currentScope(),[]);
       /* Reset is LOCAL ONLY. It intentionally does not rebuild and does not send tombstones. */
       localStorage.setItem(RESET_HOLD_KEY+hashScope(currentScope()),new Date().toISOString());
       localStorage.removeItem(RESET_KEY);
@@ -321,7 +467,7 @@
     state.pending.clear();
     clearTimeout(state.timer);
     state.timer=null;
-    var prefixes=[CACHE_PREFIX,RECONCILE_PREFIX,DELETE_QUEUE_PREFIX,RESET_HOLD_KEY,PENDING_PREFIX];
+    var prefixes=[CACHE_PREFIX,RECONCILE_PREFIX,DELETE_QUEUE_PREFIX,RESET_HOLD_KEY,PENDING_PREFIX,OFFLINE_QUEUE_PREFIX];
     var exact=[RESET_KEY,TOKEN_KEY,ACTIVE_PROFILE_KEY,ACTIVE_FACILITY_KEY,ACCESS_HINT_KEY];
     var keys=[];
     for(var i=0;i<localStorage.length;i++){
@@ -333,7 +479,7 @@
     }
     keys.forEach(function(key){localStorage.removeItem(key);});
     exact.forEach(function(key){localStorage.removeItem(key);});
-    ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs'].forEach(function(name){
+    ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','clearances'].forEach(function(name){
       localStorage.removeItem(name);
       try{localStorage.setItem(name,'[]');}catch(e){}
     });
@@ -413,11 +559,25 @@
     if(localResetHeld(currentScope())) return;
     if(!state.token||!navigator.onLine||!currentFacility()||!currentInCharge())return;
     try{
+      // Never let an authoritative full pull erase a transaction that was just
+      // created locally but has not reached Central yet. Flush live pending work
+      // first; if the POST fails, keep the local state and postpone the full pull.
+      if(state.pending.size){
+        var flushed=await sync(false);
+        if(!flushed && state.pending.size)return;
+      }
       var resp=await api('/api/state');
       if(resp.profileKey && state.activeProfileKey && resp.profileKey!==state.activeProfileKey)throw Object.assign(new Error('PROFILE_SCOPE_MISMATCH'),{status:409});
-      applyFullState(resp); state.activeProfileKey=resp.profileKey||state.activeProfileKey;
+      var offlineQueue=loadOfflineQueue(currentScope());
+      applyFullState(resp); state.activeProfileKey=resp.profileKey||state.activeProfileKey; state.lastFullPullAt=Date.now();
+      if(offlineQueue.length){applyOfflineQueueToLocal(offlineQueue);showOfflineReview();}
       if(state.activeProfileKey)localStorage.setItem(ACTIVE_PROFILE_KEY,state.activeProfileKey);
-      setStatus('Central '+scopeLabel()+' synced','ok');
+      if(offlineQueue.length){
+        setStatus('Central loaded · '+offlineQueue.length+' offline change(s) waiting for review','warn');
+      }else if(!state.initialSyncNoticeShown){
+        setStatus('Central '+scopeLabel()+' synced','ok',{force:true});
+        state.initialSyncNoticeShown=true;
+      }
     }catch(e){
       if(e.status===401||e.status===403||e.status===409){state.token='';state.activeProfileKey='';localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(ACTIVE_PROFILE_KEY);setStatus(e.status===403 && e.data && e.data.error==='PROFILE_ARCHIVED'?'Profile is archived — contact Central Admin':(e.status===409?'Profile scope changed — reconnect':'Access expired — reconnect'),'warn');openAuth();}
       else setStatus('Central reconcile waiting for connection','warn');
@@ -443,9 +603,14 @@
     try{
       var facility=currentFacility(),inCharge=currentInCharge();
       if(!facility||!inCharge)throw new Error('PROFILE_REQUIRED');
+      // Resolve a reachable Central endpoint before authentication. This lets a
+      // deployed client recover if the primary Cloudflare hostname is temporarily
+      // unavailable but the compatible QLog API hostname is active.
+      var reachable=await checkServerHealth(3500);
+      if(!reachable) throw new Error('CENTRAL_API_UNREACHABLE');
       var d=await fetch(API_BASE+'/api/auth/device',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accessCode:code,sourceId:state.sourceId,facility:facility,inCharge:inCharge,designation:currentDesignation(),role:currentRole()})});
       var j=await d.json().catch(function(){return{};}); if(!d.ok)throw new Error(j.error||('HTTP '+d.status));
-      state.token=j.token; state.activeFacility=facility; state.activeProfileKey=j.profileKey||scopeId(); state.activeScope=currentScope();
+      state.token=j.token; state.activeFacility=facility; state.activeProfileKey=j.profileKey||scopeId(); state.activeScope=currentScope(); state.initialSyncNoticeShown=false; state.lastSuccessReceipt='';
       var serverGeneration=Number(j.centralResetGeneration||0);
       var storedGenerationRaw=localStorage.getItem(CENTRAL_RESET_GENERATION_KEY);
       var storedGeneration=storedGenerationRaw===null?null:Number(storedGenerationRaw);
@@ -491,12 +656,10 @@
       }else{
         loadProfileCache(currentScope());
         await activateSync('existing');
-        await sync(true);
         await fullProfileReconcile();
       }
       closeAuth(); connectSocket();
       try{ window.dispatchEvent(new Event('qlog:central-ready')); }catch(e){}
-      if(!held) setStatus('Central '+scopeLabel()+' connected','ok');
     }catch(e){
       var er=document.getElementById('qlogCentralAuthError'); if(er)er.textContent='Connection failed: '+e.message;
       setStatus('Central not connected','err');
@@ -521,6 +684,7 @@
         state.activeProfileKey=switched.profileKey||targetProfileId;
         state.activeFacility=currentFacility();
         state.activeScope=scope;
+        state.initialSyncNoticeShown=false; state.lastSuccessReceipt='';
         localStorage.setItem(TOKEN_KEY,state.token);
         localStorage.setItem(ACTIVE_PROFILE_KEY,state.activeProfileKey);
         localStorage.setItem(ACTIVE_FACILITY_KEY,state.activeFacility);
@@ -532,10 +696,10 @@
         if(cached) loadProfileCache(scope); else PROFILE_DATASETS.forEach(function(n){setDatasetLocal(n,[],false);});
         refreshUi();
         await activateSync('existing');
-        // Flush only this profile's queued local changes, then pull remote deltas.
-        if(state.pending.size) await sync(false);
-        await reconcile();
-        clearPending(scope);
+        // Central is authoritative on profile entry. Pull first; queued offline
+        // work is replayed locally and waits for explicit review/sync.
+        await fullProfileReconcile();
+        if(!hasOfflineQueue(scope)) clearPending(scope);
         connectSocket();
         try{ window.dispatchEvent(new Event('qlog:central-profile-switched')); }catch(e){}
         setStatus('Central '+scopeLabel()+' switched instantly','ok');
@@ -547,8 +711,8 @@
       localStorage.setItem('qlogCentralActiveScope',scope);
       state.pending=loadPending(scope);
       if(state.token){
-        if(hasProfileCache(scope)){loadProfileCache(scope);await reconcile();}
-        else{await fullProfileReconcile();saveProfileCache(scope);}
+        if(hasProfileCache(scope))loadProfileCache(scope);
+        await fullProfileReconcile();saveProfileCache(scope);
         connectSocket();
       }
     }catch(e){
@@ -565,6 +729,8 @@
 
   async function sync(forceAll){
     if(state.syncing||!navigator.onLine||!state.token||!state.activeProfileKey)return false;
+    // Pending Offline Review items are an independent lane. They must never block
+    // a new transaction created while Central is currently reachable.
     if(state.activeProfileKey!==scopeId())return false;
     state.syncing=true;
     try{
@@ -582,7 +748,12 @@
       state.pending.clear(); savePending(currentScope(),state.pending); clearDeleteQueue(currentScope());
       // Socket.IO will invalidate remote peers; avoid an immediate second GET here.
       // The fallback reconcile timer remains responsible when sockets are unavailable.
-      setStatus('Central sync complete · '+scopeLabel()+' · deduped '+((resp.deduped||[]).length),'ok');
+      var changedCount=((resp.accepted||[]).length)+((resp.deleted||[]).length);
+      if(changedCount>0){
+        // One success toast per completed transaction batch. Background pulls are silent.
+        state.lastSuccessReceipt='';
+        setStatus('Synced '+changedCount+' data update'+(changedCount===1?'':'s')+' to Central','ok',{force:true});
+      }
       return true;
     }catch(e){
       if(e.status===401||e.status===403){state.token='';state.activeProfileKey='';localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(ACTIVE_PROFILE_KEY);setStatus('Profile authentication required','warn');openAuth();}
@@ -595,30 +766,32 @@
     names=(names||SYNC_KEYS).filter(function(n){return SYNC_KEYS.indexOf(n)!==-1;});
     names.forEach(function(n){state.pending.add(n);});
     savePending(currentScope(),state.pending);
-    clearTimeout(state.timer); state.timer=setTimeout(function(){sync(false);},140);
+    clearTimeout(state.timer);
+    if(!navigator.onLine){state.timer=null;return;}
+    state.timer=setTimeout(function(){sync(false);},60);
   }
   function patchStorage(){
-    var ls=window.localStorage; if(!ls||ls.__qlogCentralPatched)return;
+    var ls=window.localStorage;if(!ls||ls.__qlogCentralPatched)return;
     var os=ls.setItem.bind(ls),or=ls.removeItem.bind(ls);
     ls.setItem=function(k,v){
-      if(k==='savedSession'){
-        os(k,v);
-        setTimeout(function(){profileChanged();},0);
-        return;
-      }
-      var before=null;
-      if(!state.suppress&&SYNC_KEYS.indexOf(k)!==-1){try{before=JSON.parse(ls.getItem(k)||'null');}catch(e){}}
+      if(k==='savedSession'){os(k,v);setTimeout(function(){profileChanged();},0);return;}
+      var before=null,after=null,tracked=!state.suppress&&SYNC_KEYS.indexOf(k)!==-1;
+      if(tracked){try{before=JSON.parse(ls.getItem(k)||'null');}catch(e){}}
+      if(tracked){try{after=JSON.parse(v);if(Array.isArray(after)){ensureStableIds(k,after);v=JSON.stringify(after);syncWindowArray(k,after);}}catch(e){after=null;}}
       os(k,v);
-      if(!state.suppress&&SYNC_KEYS.indexOf(k)!==-1){
-        try{queueDeletedDifference(k,before,JSON.parse(v));}catch(e){}
+      if(tracked){
+        if(after===null){try{after=JSON.parse(v);}catch(e){}}
+        if(!navigator.onLine){queueOfflineDifference(k,before,after);showOfflineReview();return;}
+        try{queueDeletedDifference(k,before,after);}catch(e){}
         schedule([k]);
       }
     };
     ls.removeItem=function(k){
-      var before=null;
-      if(!state.suppress&&SYNC_KEYS.indexOf(k)!==-1){try{before=JSON.parse(ls.getItem(k)||'null');}catch(e){}}
+      var before=null,tracked=!state.suppress&&SYNC_KEYS.indexOf(k)!==-1;
+      if(tracked){try{before=JSON.parse(ls.getItem(k)||'null');}catch(e){}}
       or(k);
-      if(!state.suppress&&SYNC_KEYS.indexOf(k)!==-1){
+      if(tracked){
+        if(!navigator.onLine){queueOfflineDifference(k,before,[]);showOfflineReview();return;}
         if(Array.isArray(before)){var q=readDeleteQueue(currentScope());q[k]=(q[k]||[]).concat(before.map(function(item,i){return recordIdentity(k,item,i);}).filter(function(x){return q[k].indexOf(x)===-1;}));writeDeleteQueue(currentScope(),q);}
         schedule([k]);
       }
@@ -626,24 +799,36 @@
     ls.__qlogCentralPatched=true;
   }
   function installSaveHooks(){
-    if(typeof window.saveAll==='function'&&!window.saveAll.__qlogWrapped){var old=window.saveAll;window.saveAll=function(){var r=old.apply(this,arguments);schedule(['people','logs']);return r;};window.saveAll.__qlogWrapped=true;}
+    if(typeof window.saveAll==='function'&&!window.saveAll.__qlogWrapped){var old=window.saveAll;window.saveAll=function(){var r=old.apply(this,arguments);schedule(['logs']);return r;};window.saveAll.__qlogWrapped=true;}
     if(typeof window.saveEquipData==='function'&&!window.saveEquipData.__qlogWrapped){var oldEq=window.saveEquipData;window.saveEquipData=function(){var r=oldEq.apply(this,arguments);schedule(['equipment','equipLogs']);return r;};window.saveEquipData.__qlogWrapped=true;}
   }
   function connectSocket(){
-    if(state.socket||!state.token||!navigator.onLine)return;
+    if(state.socket||state.socketScriptLoading||!state.token||!navigator.onLine)return;
+    state.socketScriptLoading=true;
     try{
       var s=document.createElement('script'); s.src=API_BASE+'/socket.io/socket.io.js';
-      s.onload=function(){
+      s.onload=function(){state.socketScriptLoading=false;
         try{
           if(typeof window.io!=='function')return;
           state.socket=window.io(API_BASE,{auth:{token:state.token},transports:['websocket','polling']});
-          state.socket.on('connect',function(){window.dispatchEvent(new CustomEvent('qlog-live-status'));});
+          state.socket.on('connect',function(){
+            window.dispatchEvent(new CustomEvent('qlog-live-status'));
+            // Socket reconnect means Central may have changed while this client was
+            // sleeping/backgrounded (common on iOS). Reconcile immediately.
+            reconcile();
+          });
           state.socket.on('disconnect',function(){window.dispatchEvent(new CustomEvent('qlog-live-status'));});
           state.socket.on('presence:count',function(m){window.QLOG_CONNECTED_CLIENTS=(m&&m.connectedClients)||0;window.dispatchEvent(new CustomEvent('qlog-live-status'));});
           state.socket.on('qlog:updated',function(evt){
             if(!evt)return;
-            if(evt.profileKey && state.activeProfileKey && evt.profileKey!==state.activeProfileKey)return;
-            reconcile();
+            var ds=Array.isArray(evt.datasets)?evt.datasets:(Array.isArray(evt.changed)?evt.changed:[]);
+            var schoolWide=ds.some(function(x){return SCHOOL_WIDE_DATASETS.indexOf(x)!==-1;});
+            // Different accounts still receive school-wide operational changes.
+            if(evt.profileKey && state.activeProfileKey && evt.profileKey!==state.activeProfileKey && !schoolWide && !evt.centralClientInventory && !evt.centralSettingsChanged)return;
+            if(ds.indexOf('logs')!==-1){
+              try{window.dispatchEvent(new CustomEvent('qlog:visitor-directory-updated',{detail:evt}));}catch(e){}
+            }
+            if(evt.centralClientInventory||evt.centralSettingsChanged)fullProfileReconcile(); else reconcile();
           });
           state.socket.on('qlog:central_reset',function(evt){
             try{
@@ -658,9 +843,14 @@
             setStatus('Central database was reset. All local office caches were cleared. Sign in again.','warn');
             openAuth();
           });
+          state.socket.on('qlog:central_restored',function(evt){
+            try{state.suppress=true;clearAllCentralClientCaches();localStorage.setItem(CENTRAL_RESET_GENERATION_KEY,String((evt&&evt.centralResetGeneration)||0));}finally{state.suppress=false;}
+            setStatus('Central operational backup restored. Reconnect to reload your bound profile.','warn');openAuth();
+          });
           state.socket.on('connect_error',function(){/* polling fallback */});
         }catch(e){}
       };
+      s.onerror=function(){state.socketScriptLoading=false;};
       document.head.appendChild(s);
     }catch(e){}
   }
@@ -673,7 +863,7 @@
   async function init(){
     injectUI(); patchStorage(); installSaveHooks();
     var facility=currentFacility(),inCharge=currentInCharge(),scope=currentScope();
-    if(!facility||!inCharge){setStatus('Waiting for In-Charge profile…','warn');setTimeout(init,1200);return;}
+    if(!facility||!inCharge){setStatus('Waiting for In-Charge profile…','warn');setTimeout(init,250);return;}
     state.activeFacility=facility;
     if(state.activeProfileKey && state.activeProfileKey!==scopeId() && state.token){
       // Keep the authenticated device session; switchProfile() will perform a fast server-side profile handoff.
@@ -699,43 +889,52 @@
       if(held){
         setStatus('Connected to Central. Local device is reset; click Rebuild My Office Data to restore.','warn');
       }else if(resetRequested || !cached){ await fullProfileReconcile(); saveProfileCache(scope); localStorage.removeItem(RESET_KEY); }
-      else { await sync(true); await fullProfileReconcile(); }
+      else { await fullProfileReconcile(); }
       connectSocket();
       try{ window.dispatchEvent(new Event('qlog:central-ready')); }catch(e){}
     }else{
       setStatus('Central profile authentication required','warn'); openAuth();
     }
-    setInterval(function(){installSaveHooks();watchProfile();if(navigator.onLine){if(state.pending.size)sync(false);else reconcile();connectSocket();}},4000);
-    window.addEventListener('online',function(){watchProfile();setStatus('Online — syncing '+scopeLabel()+'…','warn');sync(true);reconcile();connectSocket();});
+    setInterval(function(){installSaveHooks();watchProfile();if(navigator.onLine){if(hasOfflineQueue(currentScope()))showOfflineReview();if(state.pending.size)sync(false);else reconcile();connectSocket();}},5000);
+    window.addEventListener('online',function(){watchProfile();setStatus('Online — loading Central data for '+scopeLabel()+'…','warn');reconcile().then(function(){if(hasOfflineQueue(currentScope()))showOfflineReview();});connectSocket();});
   }
 
   async function lookupVisitorByQR(qr){
     var code=String(qr||'').trim();
-    if(!code||!state.token||!navigator.onLine)return null;
+    if(!code||!navigator.onLine)return null;
+    // A QR can be scanned immediately after a cross-device/account login. Give the
+    // Central authentication handoff a very short bounded window instead of
+    // incorrectly treating the registered visitor as unknown.
+    for(var i=0;i<6 && !state.token;i++) await new Promise(function(r){setTimeout(r,120);});
+    if(!state.token)return null;
     try{
       var resp=await api('/api/visitors/lookup?qr='+encodeURIComponent(code));
       return resp&&resp.found?resp.visitor:null;
     }catch(e){ return null; }
   }
 
+  function cachedVisitorFaces(){
+    try{var v=JSON.parse(localStorage.getItem(VISITOR_FACE_CACHE_KEY)||'[]');return Array.isArray(v)?v:[];}catch(e){return [];}
+  }
+  function saveVisitorFaces(v){try{if(Array.isArray(v)&&v.length)localStorage.setItem(VISITOR_FACE_CACHE_KEY,JSON.stringify(v));}catch(e){}}
   async function lookupVisitorFaces(){
-    if(!navigator.onLine)return [];
-    // A second device may start the visitor camera before the fast Central
-    // authentication handshake has completed. Wait for the existing session
-    // instead of returning an empty face directory and falling back locally.
-    for(var i=0;i<40 && !state.token;i++) await new Promise(function(r){setTimeout(r,250);});
-    if(!state.token)return [];
+    var cached=cachedVisitorFaces();
+    if(!navigator.onLine)return cached;
+    // Never block the camera for ~10 seconds waiting for auth. A normal logged-in
+    // session should already have a token; on a fast device/account handoff wait
+    // only briefly, then use the last Central directory while auth finishes.
+    for(var i=0;i<6 && !state.token;i++) await new Promise(function(r){setTimeout(r,200);});
+    if(!state.token)return cached;
     try{
       var resp=await api('/api/visitors/faces');
-      return (resp&&Array.isArray(resp.visitors))?resp.visitors:[];
+      var faces=(resp&&Array.isArray(resp.visitors))?resp.visitors:[];
+      if(faces.length)saveVisitorFaces(faces);
+      return faces.length?faces:cached;
     }catch(e){
-      if(e.status===401||e.status===403){
-        for(var j=0;j<8 && !state.token;j++) await new Promise(function(r){setTimeout(r,250);});
-        if(state.token){
-          try{var retry=await api('/api/visitors/faces'); return (retry&&Array.isArray(retry.visitors))?retry.visitors:[];}catch(_e){}
-        }
+      if((e.status===401||e.status===403) && state.token){
+        try{var retry=await api('/api/visitors/faces');var again=(retry&&Array.isArray(retry.visitors))?retry.visitors:[];if(again.length)saveVisitorFaces(again);return again.length?again:cached;}catch(_e){}
       }
-      return [];
+      return cached;
     }
   }
 
@@ -763,19 +962,20 @@
   }
 
   window.qlogCentralBoot=async function(){
-    try{var r=await fetch(API_BASE+'/api/health',{cache:'no-store'});return !!r.ok;}catch(e){return false;}
+    return await checkServerHealth(4500);
   };
-  window.qlogCentralStatus=function(){return {serverReady:!!state.token&&navigator.onLine,socketReady:!!(state.socket&&state.socket.connected),clientId:state.sourceId,connectedClients:window.QLOG_CONNECTED_CLIENTS||0,profileKey:state.activeProfileKey};};
+  window.qlogCentralStatus=function(){return {serverReady:!!state.serverReady&&navigator.onLine,socketReady:!!(state.socket&&state.socket.connected),authenticated:!!state.token,clientId:state.sourceId,connectedClients:window.QLOG_CONNECTED_CLIENTS||0,profileKey:state.activeProfileKey};};
 
   window.QLogCentral={
     connect:function(){var i=document.getElementById('qlogCentralCode');if(i)connectWithCode(i.value.trim());},
     closeAuth:closeAuth,
-    sync:function(){schedule(SYNC_KEYS);sync(true);},
-    syncDatasets:function(names){schedule(names||SYNC_KEYS);sync(false);},
+    sync:function(){if(hasOfflineQueue(currentScope()))return showOfflineReview();schedule(SYNC_KEYS);sync(true);},
+    syncDatasets:function(names){if(hasOfflineQueue(currentScope()))return showOfflineReview();schedule(names||SYNC_KEYS);sync(false);},
     syncDatasetsNow:syncDatasetsNow,
     resetDevice:resetThisDevice,
     rebuildMyOffice:rebuildMyOffice,
     getDeleteQueue:function(){return readDeleteQueue(currentScope());},
+    newSyncId:stableId,
     getApiBase:function(){return API_BASE;},
     getSourceId:function(){return state.sourceId;},
     getFacility:function(){return state.activeFacility;},
@@ -784,8 +984,33 @@
     checkInventoryBatch:checkInventoryBatch,
     lookupVisitorByQR:lookupVisitorByQR,
     lookupVisitorFaces:lookupVisitorFaces,
-    profileChanged:profileChanged
+    profileChanged:profileChanged,
+    showOfflineReview:showOfflineReview,
+    closeOfflineReview:closeOfflineReview,
+    discardOfflineItem:discardOfflineItem,
+    syncReviewedOffline:syncReviewedOffline,
+    getOfflineQueue:function(){return loadOfflineQueue(currentScope());}
   };
 
-  window.addEventListener('load',function(){setTimeout(init,1200);});
+  function fastResumeCentral(){
+    if(!navigator.onLine)return;
+    checkServerHealth(2500);
+    if(state.token){
+      connectSocket();
+      reconcile();
+      if(Date.now()-Number(state.lastFullPullAt||0)>10000)fullProfileReconcile();
+    }
+  }
+  window.addEventListener('load',function(){
+    // Do not leave mobile/Safari waiting more than a second before Central auth/sync
+    // begins. init() will retry briefly if the local role session is still loading.
+    setTimeout(init,120);
+    setTimeout(function(){checkServerHealth(2500);},120);
+    if(!state.healthTimer){state.healthTimer=setInterval(function(){if(navigator.onLine)checkServerHealth(2000);else setServerReady(false);},20000);}
+  });
+  window.addEventListener('online',fastResumeCentral);
+  window.addEventListener('focus',fastResumeCentral);
+  window.addEventListener('pageshow',fastResumeCentral);
+  document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')fastResumeCentral();});
+  window.addEventListener('offline',function(){setServerReady(false);});
 })();
