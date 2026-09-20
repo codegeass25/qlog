@@ -590,6 +590,8 @@ var visitorRegistrationState = {
     reason: '',
     /* 'ID_OCR' | 'MANUAL' - how the visitor's NAME was originally established */
     nameSource: null,
+    nameEdited: false,
+    nameEditedAt: '',
     requiresIdRecheck: false,
     autoLogInProgress: false,
     logged: false,
@@ -616,7 +618,7 @@ function resetVisitorRegistrationState(){
         idVerified: false, idVerificationEvidence: null, ocrConfidence: 0, confirmedFrames: 0,
         idSource: '', idNumber: '',
         idType: '', dob: '', faceDetected: false, faceRegistered: false, faceRecognized: false,
-        faceDescriptor: null, faceImage: '', reason: '', nameSource: null, requiresIdRecheck: false,
+        faceDescriptor: null, faceImage: '', reason: '', nameSource: null, nameEdited: false, nameEditedAt: '', requiresIdRecheck: false,
         autoLogInProgress: false, logged: false, centralProfile: null, centralLookupPending: false,
         centralIdVerified: false, requiresCentralFaceMatch: false
     };
@@ -645,13 +647,9 @@ function maskIdNumber(v){
     return new Array(v.length - 3).join('*') + '*' + v.slice(-4);
 }
 
-/* The visitor name field is NEVER free-text while an ID is being verified.
-   Only these trusted sources may write into it:
-     - 'face'    : an already-registered visitor matched by face recognition
-     - 'id'      : a Valid ID that passed the FULL verification pipeline
-     - 'manual'  : the guard explicitly chose NO VALID ID AVAILABLE
-     - 'clear'   : reset
-   Anything else is refused. */
+/* Visitor name auto-fill remains authoritative for identity verification, but the
+   operator may correct the populated display name afterward. The original
+   verification evidence stays preserved for audit. */
 function setVisitorName(name, source, trust){
     var f = document.getElementById('visitorName');
     if(!f) return;
@@ -670,7 +668,7 @@ function setVisitorName(name, source, trust){
     }
     f.value = name || '';
     // The trusted state must be updated BEFORE the events fire, otherwise the
-    // readonly-guard in onVisitorNameInput() reverts the freshly written name.
+    // state is updated before events so auto-fill is not misclassified as an operator correction.
     visitorRegistrationState.name = name || '';
     try {
         f.dispatchEvent(new Event('input', { bubbles: true }));
@@ -689,35 +687,45 @@ function setVisitorName(name, source, trust){
     _syncVisitorNameEditability();
 }
 
-/* Name field is editable ONLY in MANUAL_NO_ID mode. */
+/* The visitor name field is ALWAYS editable after it is populated.
+   Auto-fill still saves the trusted source/evidence; edits are treated as an
+   operator correction to the display name, not as a loss of verification. */
 function _syncVisitorNameEditability(){
     var f = document.getElementById('visitorName');
     if(!f) return;
-    var manual = visitorRegistrationState.identityVerificationMethod === 'MANUAL_NO_ID';
-    if(manual){
-        f.removeAttribute('readonly');
+    f.removeAttribute('readonly');
+    f.removeAttribute('disabled');
+    f.disabled = false;
+    if(visitorRegistrationState.identityVerificationMethod === 'MANUAL_NO_ID'){
         f.placeholder = 'Full Name (manual entry \u2014 no valid ID presented)';
     } else {
-        f.setAttribute('readonly', 'readonly');
-        f.placeholder = 'Full Name (captured automatically from Valid ID / face recognition)';
+        f.placeholder = 'Full Name (auto-filled \u2014 correct here if needed)';
     }
 }
 
-/* Keeps state in sync with the guard's manual typing, and hard-blocks typing
-   in every other mode (defence in depth: not only the readonly attribute). */
+/* Keeps state in sync with operator corrections in ALL visitor modes.
+   For ID/face-verified visitors the original verification evidence remains
+   intact while the corrected name becomes the visit/display name. */
 function onVisitorNameInput(){
     var f = document.getElementById('visitorName');
     if(!f) return;
     var st = visitorRegistrationState;
+    var next = f.value.trim();
+    var changed = next !== String(st.name || '').trim();
+    st.name = next;
     if(st.identityVerificationMethod === 'MANUAL_NO_ID'){
-        st.name = f.value.trim();
         st.manualNoId = true;
         st.idVerified = false;
         st.idVerificationEvidence = null;
-        return;
+    } else if(changed){
+        st.nameEdited = true;
+        st.nameEditedAt = new Date().toISOString();
+        var note = document.getElementById('visitorNameSource');
+        if(note && next){
+            note.style.display = 'block';
+            note.textContent = '\u270e Auto-filled name corrected by operator';
+        }
     }
-    // Not in manual mode: revert any attempted edit to the trusted value.
-    if(f.value !== (st.name || '')) f.value = st.name || '';
 }
 
 /* ====================== OFFLINE OCR (PP-OCR / PaddleOCR) ======================
@@ -2239,7 +2247,7 @@ function _validateVisitorIdentityForLogging(st){
         if(!st.idVerified) return { ok:false, message:'Valid ID verification is required before logging.' };
         if(!name) return { ok:false, message:'The visitor name has not been verified from the ID yet.' };
         if(!ev || ev.verified !== true || !ev.name) return { ok:false, message:'Valid ID verification evidence is missing.' };
-        if(_normalizeNameKey(ev.name) !== _normalizeNameKey(name)) return { ok:false, message:'The visitor name does not match the verified ID. Please re-scan the ID.' };
+        // The auto-filled name may be corrected after verification; ev.name remains the original verified-ID name for audit.
         if(!ev.confirmedFrames || ev.confirmedFrames < 1) return { ok:false, message:'Valid ID verification evidence is incomplete.' };
         if(st.manualNoId) return { ok:false, message:'Conflicting identity verification state. Please restart verification.' };
         return { ok:true, message:'' };
@@ -2328,7 +2336,9 @@ async function autoLogVisitorAfterReason(){
             manualNoId: st.manualNoId === true,
             ocrConfidence: st.ocrConfidence,
             confirmedFrames: st.confirmedFrames,
-            idVerificationEvidence: st.idVerificationEvidence
+            idVerificationEvidence: st.idVerificationEvidence,
+            nameEdited: st.nameEdited === true,
+            nameEditedAt: st.nameEditedAt || ''
         });
         if(!rec) return;
 
@@ -2413,8 +2423,14 @@ function saveVisitorLog(data){
                     confidence: data.idVerificationEvidence.confidence || 0,
                     confirmedFrames: data.idVerificationEvidence.confirmedFrames || 0,
                     idType: data.idVerificationEvidence.idType || '',
-                    verifiedAt: data.idVerificationEvidence.verifiedAt || ''
+                    verifiedAt: data.idVerificationEvidence.verifiedAt || '',
+                    verifiedName: data.idVerificationEvidence.name || ''
                 };
+            }
+            if(data.nameEdited === true){
+                rec.nameEdited = true;
+                rec.nameEditedAt = data.nameEditedAt || new Date().toISOString();
+                rec.verifiedIdName = (data.idVerificationEvidence && data.idVerificationEvidence.name) || '';
             }
         } else if(data.identityVerificationMethod){
             rec.identityVerificationMethod = String(data.identityVerificationMethod);

@@ -485,6 +485,23 @@
     localStorage.removeItem(RESET_HOLD_KEY+hashScope(scope));
   }
 
+  function clearOperationalOfflineStores(){
+    // Purge OPERATIONAL data cached for offline use. Keep the service-worker
+    // app shell/models so QLog itself still opens offline after a Central reset.
+    try{
+      if(window.QLogClearance && typeof window.QLogClearance.clearAll==='function'){
+        Promise.resolve(window.QLogClearance.clearAll()).catch(function(e){console.warn('[central-reset] clearance archive purge failed',e);});
+      }else if(window.indexedDB){
+        try{window.indexedDB.deleteDatabase('qlogProClearanceArchive');}catch(e){}
+      }
+    }catch(e){}
+    try{ if(typeof window.visitorTempLogs!=='undefined') window.visitorTempLogs={}; }catch(e){}
+    try{ if(typeof window.faceDescriptorCache!=='undefined') window.faceDescriptorCache=[]; }catch(e){}
+    try{ if(typeof window.centralFaceDirectory!=='undefined') window.centralFaceDirectory=[]; }catch(e){}
+    try{ if(typeof window.resetVisitorRegistrationState==='function') window.resetVisitorRegistrationState(); }catch(e){}
+    try{ window.dispatchEvent(new CustomEvent('qlog:central-hard-reset')); }catch(e){}
+  }
+
   function clearAllCentralClientCaches(){
     if(state.socket){
       try{state.socket.disconnect();}catch(e){}
@@ -518,6 +535,8 @@
     localStorage.removeItem('qlogCentralActiveScope');
     state.pending.clear();
     window.people=[];window.logs=[];window.books=[];window.borrowLogs=[];window.reservations=[];window.auditLogs=[];window.equipment=[];window.equipLogs=[];
+    try{sessionStorage.removeItem('qlogCentralOfficeCode');}catch(e){}
+    clearOperationalOfflineStores();
     refreshUi();
   }
 
@@ -585,6 +604,21 @@
     }
   }
 
+  function applyCentralResetGeneration(serverGeneration){
+    var g=Number(serverGeneration||0);
+    if(!g)return false;
+    var raw=localStorage.getItem(CENTRAL_RESET_GENERATION_KEY);
+    var localGen=raw===null?null:Number(raw);
+    if(localGen!==null && localGen===g)return false;
+    // Central reset generation always wins over every local/offline copy.
+    clearAllCentralClientCaches();
+    localStorage.setItem(CENTRAL_RESET_GENERATION_KEY,String(g));
+    state.token=''; state.activeProfileKey=''; state.activeFacility=''; state.activeScope='';
+    setStatus('Central operational data was reset. This device and its offline caches were cleared. Sign in again.','warn');
+    try{openAuth();}catch(e){}
+    return true;
+  }
+
   async function fullProfileReconcile(){
     if(localResetHeld(currentScope())) return;
     if(!state.token||!navigator.onLine||!currentFacility()||!currentInCharge())return;
@@ -597,6 +631,7 @@
         if(!flushed && state.pending.size)return;
       }
       var resp=await api('/api/state');
+      if(applyCentralResetGeneration(resp.centralResetGeneration)) return;
       if(resp.profileKey && state.activeProfileKey && resp.profileKey!==state.activeProfileKey)throw Object.assign(new Error('PROFILE_SCOPE_MISMATCH'),{status:409});
       var offlineQueue=loadOfflineQueue(currentScope());
       applyFullState(resp); state.activeProfileKey=resp.profileKey||state.activeProfileKey; state.lastFullPullAt=Date.now();
@@ -620,6 +655,7 @@
     try{
       var since=localStorage.getItem(reconcileKey(currentScope()))||'1970-01-01T00:00:00.000Z';
       var resp=await api('/api/reconcile?since='+encodeURIComponent(since));
+      if(applyCentralResetGeneration(resp.centralResetGeneration)) return;
       if(resp.profileKey && state.activeProfileKey && resp.profileKey!==state.activeProfileKey)throw Object.assign(new Error('PROFILE_SCOPE_MISMATCH'),{status:409});
       applyDelta(resp);
     }catch(e){
@@ -790,7 +826,10 @@
       return true;
     }catch(e){
       if(e.status===401||e.status===403){state.token='';state.activeProfileKey='';localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(ACTIVE_PROFILE_KEY);setStatus('Profile authentication required','warn');openAuth();}
-      else if(e.status===409 && e.data && (e.data.error==='SYNC_NOT_ACTIVATED'||e.data.error==='CENTRAL_RESET_REQUIRED')){setStatus('Central reset state detected. Reconnect before syncing.','warn');openAuth();}
+      else if(e.status===409 && e.data && (e.data.error==='SYNC_NOT_ACTIVATED'||e.data.error==='CENTRAL_RESET_REQUIRED')){
+        if(e.data.centralResetGeneration) applyCentralResetGeneration(e.data.centralResetGeneration);
+        else {setStatus('Central reset state detected. Reconnect before syncing.','warn');openAuth();}
+      }
       else setStatus('Central sync waiting for connection','warn');
       return false;
     }finally{state.syncing=false;}
@@ -871,10 +910,12 @@
                 try{state.socket.disconnect();}catch(e){}
                 state.socket=null;
               }
+              var g=Number((evt&&evt.centralResetGeneration)||0);
+              try{localStorage.setItem('qlogCentralResetPulse',String(g)+':'+Date.now());}catch(e){}
               clearAllCentralClientCaches();
-              localStorage.setItem(CENTRAL_RESET_GENERATION_KEY,String((evt&&evt.centralResetGeneration)||0));
+              if(g)localStorage.setItem(CENTRAL_RESET_GENERATION_KEY,String(g));
             }finally{state.suppress=false;}
-            setStatus('Central database was reset. All local office caches were cleared. Sign in again.','warn');
+            setStatus('Central operational data was reset. All local and offline operational caches on this device were cleared. Sign in again.','warn');
             openAuth();
           });
           state.socket.on('qlog:central_restored',function(evt){
@@ -933,6 +974,15 @@
     }
     setInterval(function(){installSaveHooks();watchProfile();if(navigator.onLine){if(hasOfflineQueue(currentScope()))showOfflineReview();if(state.pending.size)sync(false);else reconcile();connectSocket();}},5000);
     window.addEventListener('online',function(){watchProfile();setStatus('Online — loading Central data for '+scopeLabel()+'…','warn');reconcile().then(function(){if(hasOfflineQueue(currentScope()))showOfflineReview();});connectSocket();});
+    window.addEventListener('storage',function(ev){
+      if(ev && ev.key==='qlogCentralResetPulse' && ev.newValue){
+        var parts=String(ev.newValue).split(':'); var g=Number(parts[0]||0);
+        clearAllCentralClientCaches();
+        if(g)localStorage.setItem(CENTRAL_RESET_GENERATION_KEY,String(g));
+        setStatus('Central operational data was reset. Local/offline caches were cleared. Sign in again.','warn');
+        openAuth();
+      }
+    });
   }
 
   async function lookupVisitorByQR(qr){
