@@ -10,16 +10,25 @@
 'use strict';
 
 var BRAND_KEY='qlogSchoolBranding';
+var SIGNATORY_KEY='qlogReportSignatories';
+function signatoryStorageKey(){var s=window.currentSession||{};var scope=(String(s.facility||'').trim().toLowerCase()+'|'+String(s.inCharge||'').trim().toLowerCase());return SIGNATORY_KEY+'::'+(scope||'default');}
 var FIXED_PRODUCT='QLog Pro';
 var FIXED_CREDIT='Powered by: Magallanes NHS Team Bitaug C.I. Projects';
 
 function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function getBranding(){
   var d={schoolName:'',schoolId:'',address:'',district:'',division:'',region:'',contact:'',email:'',schoolYear:'',logo:'',accent:'#2563eb',preparedBy:'',preparedPosition:'',checkedBy:'',checkedPosition:'',approvedBy:'',approvedPosition:''};
-  /* configData is part of the Central sync contract. Keep a mirrored copy there
-     so school/report settings survive device/profile reconciliation. */
-  try{Object.assign(d,JSON.parse(localStorage.getItem(BRAND_KEY)||'{}'));}catch(e){}
-  try{var cfg=JSON.parse(localStorage.getItem('configData')||'{}');if(cfg&&cfg.qlogSchoolBranding)Object.assign(d,cfg.qlogSchoolBranding);}catch(e){}
+  var schoolFields=['schoolName','schoolId','address','district','division','region','contact','email','schoolYear','logo','accent'];
+  function mergeSchool(src){if(!src||typeof src!=='object')return;schoolFields.forEach(function(k){if(Object.prototype.hasOwnProperty.call(src,k))d[k]=src[k];});}
+  var legacy={};
+  try{legacy=JSON.parse(localStorage.getItem(BRAND_KEY)||'{}')||{};mergeSchool(legacy);}catch(e){}
+  /* Central owns school/whitelabel fields. */
+  try{var cfg=JSON.parse(localStorage.getItem('configData')||'{}');if(cfg&&cfg.qlogSchoolBranding)mergeSchool(cfg.qlogSchoolBranding);}catch(e){}
+  /* Report signatories are USER/PROFILE settings only and are never sent to Central School & Branding. */
+  var sig=null;
+  try{sig=JSON.parse(localStorage.getItem(signatoryStorageKey())||localStorage.getItem(SIGNATORY_KEY)||'null');}catch(e){}
+  if(!sig){sig={preparedBy:legacy.preparedBy||'',preparedPosition:legacy.preparedPosition||'',checkedBy:legacy.checkedBy||'',checkedPosition:legacy.checkedPosition||'',approvedBy:legacy.approvedBy||'',approvedPosition:legacy.approvedPosition||''};try{localStorage.setItem(signatoryStorageKey(),JSON.stringify(sig));}catch(e){}}
+  ['preparedBy','preparedPosition','checkedBy','checkedPosition','approvedBy','approvedPosition'].forEach(function(k){d[k]=String((sig&&sig[k])||'');});
   return d;
 }
 window.getQlogBranding=getBranding;
@@ -80,10 +89,10 @@ function ensureSettings(){
   loadBrandFields(); renderScope();
 }
 
-function mapFields(){return {qBrandSchoolName:'schoolName',qBrandSchoolId:'schoolId',qBrandSchoolYear:'schoolYear',qBrandAddress:'address',qBrandDistrict:'district',qBrandDivision:'division',qBrandRegion:'region',qBrandContact:'contact',qBrandEmail:'email',qBrandPreparedBy:'preparedBy',qBrandPreparedPos:'preparedPosition',qBrandCheckedBy:'checkedBy',qBrandCheckedPos:'checkedPosition',qBrandApprovedBy:'approvedBy',qBrandApprovedPos:'approvedPosition',qBrandAccent:'accent'};}
+function mapFields(){return {qBrandPreparedBy:'preparedBy',qBrandPreparedPos:'preparedPosition',qBrandCheckedBy:'checkedBy',qBrandCheckedPos:'checkedPosition',qBrandApprovedBy:'approvedBy',qBrandApprovedPos:'approvedPosition'};}
 function loadBrandFields(){var b=getBranding(),m=mapFields();Object.keys(m).forEach(function(id){var e=document.getElementById(id);if(e)e.value=b[m[id]]||'';});updatePreview();applyBranding();}
 function readBrandFields(){var b=getBranding(),m=mapFields();Object.keys(m).forEach(function(id){var e=document.getElementById(id);if(e)b[m[id]]=String(e.value||'').trim();});return b;}
-function saveBranding(b){try{localStorage.setItem(BRAND_KEY,JSON.stringify(b));var cfg=JSON.parse(localStorage.getItem('configData')||'{}');if(!cfg||typeof cfg!=='object'||Array.isArray(cfg))cfg={};cfg.qlogSchoolBranding=b;localStorage.setItem('configData',JSON.stringify(cfg));if(typeof window.configData==='object'&&window.configData)window.configData=cfg;}catch(e){}applyBranding();updatePreview();if(window.toast)toast('✅ School profile / report settings saved.','green');}
+function saveBranding(b){var sig={preparedBy:b.preparedBy||'',preparedPosition:b.preparedPosition||'',checkedBy:b.checkedBy||'',checkedPosition:b.checkedPosition||'',approvedBy:b.approvedBy||'',approvedPosition:b.approvedPosition||''};try{localStorage.setItem(signatoryStorageKey(),JSON.stringify(sig));}catch(e){}applyBranding();updatePreview();if(window.toast)toast('✅ Report signatories saved for this user/profile.','green');}
 function handleLogo(ev){var file=ev.target.files&&ev.target.files[0];if(!file)return;if(!/^image\/(png|jpeg|webp)$/.test(file.type)){if(window.toast)toast('Please select a PNG, JPG or WebP school logo.','red');return;}var fr=new FileReader();fr.onload=function(){var im=new Image();im.onload=function(){var c=document.createElement('canvas'),max=320,scale=Math.min(1,max/Math.max(im.width,im.height));c.width=Math.max(1,Math.round(im.width*scale));c.height=Math.max(1,Math.round(im.height*scale));c.getContext('2d').drawImage(im,0,0,c.width,c.height);var b=getBranding();b.logo=c.toDataURL('image/png',.9);saveBranding(b);loadBrandFields();};im.src=fr.result;};fr.readAsDataURL(file);}
 function updatePreview(){var b=readBrandFields(),box=document.getElementById('qClassicPreview'),img=document.getElementById('qClassicLogoPreview'),nm=document.getElementById('qClassicSchoolPreview'),ad=document.getElementById('qClassicAddressPreview');if(nm)nm.textContent=b.schoolName||'Your School / Institution';if(ad)ad.textContent=[b.address,b.schoolYear?'SY '+b.schoolYear:''].filter(Boolean).join(' • ')||'School profile appears here.';if(img&&box){if(b.logo){img.src=b.logo;box.classList.add('has-logo');}else{img.removeAttribute('src');box.classList.remove('has-logo');}}}
 function applyBranding(){var b=getBranding();document.title=FIXED_PRODUCT+(b.schoolName?' — '+b.schoolName:'');var tc=document.querySelector('meta[name="theme-color"]');if(tc)tc.setAttribute('content',b.accent||'#2563eb');var h=document.querySelector('.header h2');if(h)h.textContent=FIXED_PRODUCT;var ft=document.getElementById('facilityTitle');if(ft&&window.currentSession&&currentSession.facility){ft.textContent=((b.schoolName?b.schoolName+' • ':'')+currentSession.facility).toUpperCase();}}

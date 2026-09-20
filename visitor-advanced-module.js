@@ -2378,7 +2378,10 @@ function saveVisitorLog(data){
             timein: new Date().toLocaleTimeString(),
             timeout: '',
             date: new Date().toLocaleDateString(),
-            face: data.face || ''
+            face: data.face || '',
+            facilityName: (window.currentSession && currentSession.facility) || '',
+            facilityId: (window.QLogScope && QLogScope.unitKey) ? QLogScope.unitKey((window.currentSession && currentSession.facility) || '') : '',
+            _syncId: (window.QLogCentral && typeof window.QLogCentral.newSyncId==='function') ? window.QLogCentral.newSyncId() : ('SYNC-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10))
         };
         // Backward-compatible optional metadata (old records simply omit these).
         if(data.faceDescriptor){

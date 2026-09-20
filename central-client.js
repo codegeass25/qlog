@@ -67,6 +67,14 @@
   function currentInCharge(){ return normalize((window.currentSession||{}).inCharge || ''); }
   function currentDesignation(){ return normalize((window.currentSession||{}).designation || ''); }
   function currentRole(){ return normalize((window.currentSession||{}).role || ''); }
+  function allowedDatasetsForCurrentRole(){
+    var role=currentRole().toLowerCase(),fac=currentFacility().toUpperCase(),des=currentDesignation().toUpperCase(),text=(role+' '+fac+' '+des).toUpperCase();
+    if(role==='superadmin'||role==='admin')return new Set(SCHOOL_WIDE_DATASETS);
+    if(role==='librarian'||/LIBRAR/.test(text))return new Set(['logs','books','borrowLogs','reservations','auditLogs','clearances']);
+    if(/GUARD|SECURITY|GATE/.test(text))return new Set(['logs','auditLogs']);
+    return new Set(['logs','equipment','equipLogs','auditLogs','clearances']);
+  }
+  function eventRelevantToCurrentRole(datasets){var a=allowedDatasetsForCurrentRole();return (datasets||[]).some(function(x){return a.has(x)||GLOBAL_DATASETS.indexOf(x)!==-1;});}
   function currentScope(){ return currentFacility().toLowerCase() + '|' + currentInCharge().toLowerCase(); }
   function scopeLabel(){ return currentInCharge() + ' — ' + currentFacility(); }
   function hashScope(scope){
@@ -260,6 +268,26 @@
     var eid=n(o.id||o.equipmentId||o.equipmentID||o.eqId||o.productId||o.productID||o.inventoryId||o.itemId||o.itemID||o.assetNo||o.asset||o.propertyNo||o.propertyID||o.serialNo||o.serial||o.barcode||o.barCode||o.qrCode||o.code);
     return eid ? 'equipment|'+eid : ['equipment-fallback',n(o.name||o.eqName||o.title),n(o.category||o.type),n(o.manufacturer),n(o.model)].join('|');
   }
+  function logSemanticKey(o){
+    o=o||{};
+    function n(v){return String(v==null?'':v).trim().replace(/\s+/g,' ').toLowerCase();}
+    return [n(o.id),n(o.date),n(o.timein||o.timeIn),n(o.category),n(o.facilityName||o.facility||currentFacility())].join('|');
+  }
+  function dedupeOperationalLogs(value){
+    if(!Array.isArray(value))return value;
+    var byKey=new Map(),order=[];
+    value.forEach(function(obj){
+      var k=logSemanticKey(obj);
+      if(!k.replace(/\|/g,'')){order.push(obj);return;}
+      if(!byKey.has(k)){byKey.set(k,obj);order.push(obj);return;}
+      var prev=byKey.get(k);
+      // Keep the richer lifecycle state (e.g. a timeout added to the same TIME-IN).
+      if(!prev.timeout && obj.timeout){Object.assign(prev,obj);}
+      else if(prev.timeout && !obj.timeout){/* keep previous */}
+      else {Object.assign(prev,obj);}
+    });
+    return order;
+  }
   function dedupeLocal(name,value){
     if((name!=='books'&&name!=='equipment')||!Array.isArray(value))return value;
     var seen=new Set(),out=[];
@@ -268,7 +296,7 @@
   }
   function collectDataset(name){
     if(name==='people')return Array.isArray(window.people)?window.people:[];
-    if(name==='logs')return Array.isArray(window.logs)?window.logs:[];
+    if(name==='logs')return dedupeOperationalLogs(Array.isArray(window.logs)?window.logs:[]);
     if(name==='books')return dedupeLocal(name,Array.isArray(window.books)?window.books:[]);
     if(name==='borrowLogs')return Array.isArray(window.borrowLogs)?window.borrowLogs:[];
     if(name==='reservations')return Array.isArray(window.reservations)?window.reservations:[];
@@ -287,7 +315,7 @@
     try{
       state.suppress=true;
       if(name==='people')window.people=Array.isArray(value)?value:[];
-      else if(name==='logs')window.logs=Array.isArray(value)?value:[];
+      else if(name==='logs'){value=dedupeOperationalLogs(Array.isArray(value)?value:[]);window.logs=value;}
       else if(name==='books')window.books=Array.isArray(value)?value:[];
       else if(name==='borrowLogs')window.borrowLogs=Array.isArray(value)?value:[];
       else if(name==='reservations')window.reservations=Array.isArray(value)?value:[];
@@ -544,11 +572,13 @@
       openAuth();
       return;
     }
-    if(!confirm('Reset THIS DEVICE only for '+label+'?\n\nThis clears the data shown in all office tabs on this device.\n\nCENTRAL RECORDS WILL NOT BE DELETED.\n\nNo automatic rebuild will happen. Use "Rebuild My Office Data" when you are ready to restore the office copy.')) return;
+    if(!confirm('Reset THIS DEVICE only for '+label+'?\n\nThis clears the local operational cache on this device only.\n\nCENTRAL RECORDS WILL NOT BE DELETED.\n\nIf Central is online, the authorized profile data will be restored automatically after the reset.')) return;
     try{
       clearLocalProfileData();
-      setStatus('This device was reset. Central records are untouched. Click Rebuild My Office Data to restore.','ok');
-      alert('This device has been reset.\n\nCentral records were NOT deleted.\n\nNo automatic rebuild was performed.\nUse "Rebuild My Office Data" when you are ready to restore the office data.');
+      clearLocalResetHold(currentScope());
+      if(navigator.onLine){await fullProfileReconcile();saveProfileCache(currentScope());}
+      setStatus('This device was reset. Central records are untouched and the authorized profile was restored.','ok');
+      alert('This device has been reset.\n\nCentral records were NOT deleted.\n\nAuthorized profile data is restored automatically when Central is online. Rebuild My Office Data remains available only as a recovery tool.');
     }catch(e){
       setStatus('Device reset failed — '+(e.message||'Unknown error'),'err');
       throw e;
@@ -646,8 +676,11 @@
         setStatus('Central database was reset. '+scopeLabel()+' is EMPTY. Click Rebuild My Office Data only if you intentionally want to restore Central data.','warn');
       }else if(held){
         PROFILE_DATASETS.forEach(function(name){setDatasetLocal(name,[],false);});
-        await activateSync('empty');
-        setStatus('Connected to Central. Local device is reset; use Rebuild My Office Data to restore.','warn');
+        clearLocalResetHold(currentScope());
+        await activateSync('existing');
+        await fullProfileReconcile();
+        saveProfileCache(currentScope());
+        setStatus('Connected to Central. Authorized profile data restored automatically after device reset.','ok');
       }else if(resetRequested || !cached){
         await activateSync('existing');
         await fullProfileReconcile();
@@ -777,7 +810,7 @@
       if(k==='savedSession'){os(k,v);setTimeout(function(){profileChanged();},0);return;}
       var before=null,after=null,tracked=!state.suppress&&SYNC_KEYS.indexOf(k)!==-1;
       if(tracked){try{before=JSON.parse(ls.getItem(k)||'null');}catch(e){}}
-      if(tracked){try{after=JSON.parse(v);if(Array.isArray(after)){ensureStableIds(k,after);v=JSON.stringify(after);syncWindowArray(k,after);}}catch(e){after=null;}}
+      if(tracked){try{after=JSON.parse(v);if(Array.isArray(after)){ensureStableIds(k,after);if(k==='logs')after=dedupeOperationalLogs(after);v=JSON.stringify(after);syncWindowArray(k,after);}}catch(e){after=null;}}
       os(k,v);
       if(tracked){
         if(after===null){try{after=JSON.parse(v);}catch(e){}}
@@ -822,9 +855,10 @@
           state.socket.on('qlog:updated',function(evt){
             if(!evt)return;
             var ds=Array.isArray(evt.datasets)?evt.datasets:(Array.isArray(evt.changed)?evt.changed:[]);
-            var schoolWide=ds.some(function(x){return SCHOOL_WIDE_DATASETS.indexOf(x)!==-1;});
-            // Different accounts still receive school-wide operational changes.
-            if(evt.profileKey && state.activeProfileKey && evt.profileKey!==state.activeProfileKey && !schoolWide && !evt.centralClientInventory && !evt.centralSettingsChanged)return;
+            // Different accounts/devices reconcile only datasets allowed for the active role.
+            // Shared Visitor identity still rides on the allowed 'logs' dataset; Guard devices
+            // no longer wake up for Library/Equipment/Professional changes they cannot use.
+            if(evt.profileKey && state.activeProfileKey && evt.profileKey!==state.activeProfileKey && !eventRelevantToCurrentRole(ds) && !evt.centralClientInventory && !evt.centralSettingsChanged)return;
             if(ds.indexOf('logs')!==-1){
               try{window.dispatchEvent(new CustomEvent('qlog:visitor-directory-updated',{detail:evt}));}catch(e){}
             }
@@ -887,7 +921,9 @@
       state.pending=loadPending(scope);
       setStatus('Central '+scopeLabel()+' connection ready','warn');
       if(held){
-        setStatus('Connected to Central. Local device is reset; click Rebuild My Office Data to restore.','warn');
+        clearLocalResetHold(scope);
+        await fullProfileReconcile(); saveProfileCache(scope);
+        setStatus('Central '+scopeLabel()+' restored automatically after device reset','ok');
       }else if(resetRequested || !cached){ await fullProfileReconcile(); saveProfileCache(scope); localStorage.removeItem(RESET_KEY); }
       else { await fullProfileReconcile(); }
       connectSocket();
@@ -969,8 +1005,8 @@
   window.QLogCentral={
     connect:function(){var i=document.getElementById('qlogCentralCode');if(i)connectWithCode(i.value.trim());},
     closeAuth:closeAuth,
-    sync:function(){if(hasOfflineQueue(currentScope()))return showOfflineReview();schedule(SYNC_KEYS);sync(true);},
-    syncDatasets:function(names){if(hasOfflineQueue(currentScope()))return showOfflineReview();schedule(names||SYNC_KEYS);sync(false);},
+    sync:function(){schedule(SYNC_KEYS);sync(true);if(hasOfflineQueue(currentScope()))showOfflineReview();},
+    syncDatasets:function(names){schedule(names||SYNC_KEYS);sync(false);if(hasOfflineQueue(currentScope()))showOfflineReview();},
     syncDatasetsNow:syncDatasetsNow,
     resetDevice:resetThisDevice,
     rebuildMyOffice:rebuildMyOffice,
@@ -997,8 +1033,8 @@
     checkServerHealth(2500);
     if(state.token){
       connectSocket();
+      // Mobile resume is delta-only. Full state is reserved for login/profile switch/recovery.
       reconcile();
-      if(Date.now()-Number(state.lastFullPullAt||0)>10000)fullProfileReconcile();
     }
   }
   window.addEventListener('load',function(){

@@ -51,8 +51,12 @@
   }
 
   function brandingMeta(){
-    var b={schoolName:'',schoolId:'',address:'',district:'',division:'',region:'',contact:'',email:'',schoolYear:'',logo:'',preparedBy:'',preparedPosition:'',checkedBy:'',checkedPosition:'',approvedBy:'',approvedPosition:''};
-    try { Object.assign(b, JSON.parse(global.localStorage.getItem('qlogSchoolBranding') || '{}')); } catch(e) {}
+    var b={schoolName:'',schoolId:'',address:'',district:'',division:'',region:'',contact:'',email:'',schoolYear:'',logo:'',accent:'#2563eb',preparedBy:'',preparedPosition:'',checkedBy:'',checkedPosition:'',approvedBy:'',approvedPosition:''};
+    var schoolFields=['schoolName','schoolId','address','district','division','region','contact','email','schoolYear','logo','accent'];
+    function mergeSchool(src){if(!src||typeof src!=='object')return;schoolFields.forEach(function(k){if(Object.prototype.hasOwnProperty.call(src,k))b[k]=src[k];});}
+    try { mergeSchool(JSON.parse(global.localStorage.getItem('qlogSchoolBranding') || '{}')); } catch(e) {}
+    try { var cfg=JSON.parse(global.localStorage.getItem('configData')||'{}'); if(cfg&&cfg.qlogSchoolBranding)mergeSchool(cfg.qlogSchoolBranding); } catch(e) {}
+    try { var sess=global.currentSession||{},scope=(String(sess.facility||'').trim().toLowerCase()+'|'+String(sess.inCharge||'').trim().toLowerCase()),sk='qlogReportSignatories::'+(scope||'default'); var sig=JSON.parse(global.localStorage.getItem(sk)||global.localStorage.getItem('qlogReportSignatories')||'{}')||{}; ['preparedBy','preparedPosition','checkedBy','checkedPosition','approvedBy','approvedPosition'].forEach(function(k){b[k]=String(sig[k]||'');}); } catch(e) {}
     return b;
   }
 

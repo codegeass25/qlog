@@ -1895,6 +1895,7 @@ var reservations = JSON.parse(localStorage.getItem('reservations') || '[]');
 var stagedSessionCart = [];
 var auditLogs = JSON.parse(localStorage.getItem('auditLogs') || '[]'); 
 var dup = {}; 
+var _scanActionLocks = {}; // atomic guard: one physical scan = one attendance action
 var borrowDup = {};
 var pendingVisitorQR = '';
 var visitorTempLogs = {}; 
@@ -2445,6 +2446,20 @@ function markDup(key, ts){
 }
 function dupBlockToast(){
     toast('⏳ Duplicate action blocked — please wait 30 seconds.','yellow');
+}
+function reserveScanAction(key){
+    key=String(key||'').trim();
+    if(!key) return false;
+    if(_scanActionLocks[key] || isDupBlocked(key)) return false;
+    _scanActionLocks[key]=true;
+    markDup(key,Date.now());
+    return true;
+}
+function releaseScanAction(key){ if(key) delete _scanActionLocks[String(key).trim()]; }
+function newQlogSyncId(){
+    try{if(window.QLogCentral&&typeof window.QLogCentral.newSyncId==='function')return window.QLogCentral.newSyncId();}catch(e){}
+    try{if(window.crypto&&crypto.randomUUID)return 'SYNC-'+crypto.randomUUID();}catch(e){}
+    return 'SYNC-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,12);
 }
 
 function initStartup() {
@@ -3614,24 +3629,27 @@ function processScan(code){
         return;
     }
     
-    var openArray = logs.slice().reverse().filter(function(x){ return x.id === code && !x.timeout && (!window.QLogScope || QLogScope.recordBelongs(x, 'ATTENDANCE')); });
-    var openLog = openArray.length > 0 ? openArray[0] : null;
-    
-    var actionTime = new Date().toLocaleTimeString();
-    var actionToast = '';
-    if(openLog){
-        openLog.timeout = actionTime; 
-        scanMsg.innerHTML = '🔴 ' + p.name + ' TIMED OUT'; scanMsg.style.color = '#dc2626';
-        actionToast = '🔴 ' + p.name + ' — TIME OUT at ' + actionTime;
-    } else {
-        logs.push({ id: p.id, name: p.name, category: p.category, gs: (p.grade && p.section) ? p.grade + ' - ' + p.section : '', timein: actionTime, timeout: '', date: new Date().toLocaleDateString(), facilityName:(currentSession&&currentSession.facility)||'', facilityId:(window.QLogScope&&QLogScope.unitKey)?QLogScope.unitKey((currentSession&&currentSession.facility)||''):'' });
-        scanMsg.innerHTML = '✅ ' + p.name + ' TIMED IN'; scanMsg.style.color = '#16a34a';
-        actionToast = '✅ ' + p.name + ' — TIME IN at ' + actionTime;
-    }
-    updateLiveMonitorClock();
-    saveAll(); renderLogs();
-    markDup(code, Date.now());
-    toast(actionToast, openLog ? 'red' : 'green');
+    // Reserve the scan BEFORE mutating logs. Camera/USB decoders can emit the
+    // same code more than once in the same frame; this makes the action atomic.
+    if(!reserveScanAction(code)){ dupBlockToast(); return; }
+    try{
+        var openArray = logs.slice().reverse().filter(function(x){ return x.id === code && !x.timeout && (!window.QLogScope || QLogScope.recordBelongs(x, 'ATTENDANCE')); });
+        var openLog = openArray.length > 0 ? openArray[0] : null;
+        var actionTime = new Date().toLocaleTimeString();
+        var actionToast = '';
+        if(openLog){
+            openLog.timeout = actionTime;
+            scanMsg.innerHTML = '🔴 ' + p.name + ' TIMED OUT'; scanMsg.style.color = '#dc2626';
+            actionToast = '🔴 ' + p.name + ' — TIME OUT at ' + actionTime;
+        } else {
+            logs.push({ id: p.id, name: p.name, category: p.category, gs: (p.grade && p.section) ? p.grade + ' - ' + p.section : '', timein: actionTime, timeout: '', date: new Date().toLocaleDateString(), facilityName:(currentSession&&currentSession.facility)||'', facilityId:(window.QLogScope&&QLogScope.unitKey)?QLogScope.unitKey((currentSession&&currentSession.facility)||''):'', _syncId:newQlogSyncId() });
+            scanMsg.innerHTML = '✅ ' + p.name + ' TIMED IN'; scanMsg.style.color = '#16a34a';
+            actionToast = '✅ ' + p.name + ' — TIME IN at ' + actionTime;
+        }
+        updateLiveMonitorClock();
+        saveAll(); renderLogs();
+        toast(actionToast, openLog ? 'red' : 'green');
+    } finally { releaseScanAction(code); }
 }
 
 // Live Monitor USB Scanner Event Binding
