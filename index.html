@@ -1635,7 +1635,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:12px;">
         <div style="flex:.7; min-width:130px;">
             <label style="font-size:13px; font-weight:600;">Borrow Quantity</label>
-            <input type="number" id="eqBorrowQty" min="1" step="1" value="1" style="width:100%;" oninput="validateEquipBorrowQty()">
+            <input type="number" id="eqBorrowQty" min="1" step="1" value="1" style="width:100%;" oninput="validateEquipBorrowQty(false)" onblur="validateEquipBorrowQty(true)">
             <div id="eqBorrowQtyHint" style="font-size:11px;color:#64748b;margin-top:4px;">Select equipment to see availability.</div>
         </div>
         <div style="flex:1; min-width:170px;">
@@ -6821,12 +6821,19 @@ function eqRefreshItemBorrowStatus(item){
     else if(active.some(function(l){return l.s==='OVERDUE';}))item.status='OVERDUE';
     else item.status='BORROWED';
 }
-function validateEquipBorrowQty(){
+function validateEquipBorrowQty(commit){
     var qtyEl=document.getElementById('eqBorrowQty'),hint=document.getElementById('eqBorrowQtyHint');
     var eid=(document.getElementById('eqItemScan')||{}).value||(document.getElementById('eqItemSelect')||{}).value||'';
     var item=findEquipment(eid),avail=item?eqAvailableQty(item):0;
-    if(qtyEl){qtyEl.min='1';qtyEl.max=String(Math.max(1,avail));if(Number(qtyEl.value)<1)qtyEl.value='1';if(avail>0&&Number(qtyEl.value)>avail)qtyEl.value=String(avail);}
-    if(hint)hint.textContent=item?('Available: '+avail+' of '+eqRegisteredQty(item)):'Select equipment to see availability.';
+    if(qtyEl){
+        qtyEl.min='1';
+        if(item) qtyEl.max=String(Math.max(1,avail)); else qtyEl.removeAttribute('max');
+        /* While the user is typing, an empty value is valid temporarily.
+           Do not auto-replace it with 1 or auto-force it to the maximum. */
+        var raw=String(qtyEl.value==null?'':qtyEl.value).trim();
+        if(commit && raw==='') qtyEl.value='1';
+    }
+    if(hint)hint.textContent=item?('Available: '+avail+' of '+eqRegisteredQty(item)+(avail>0?' • Enter 1–'+avail:'')):'Select equipment to see availability.';
     return avail;
 }
 function sameUnit(a, b){
@@ -7586,9 +7593,19 @@ function recordEquipmentBorrow(){
     if(eqIsHardUnavailable(item)){ fail('⛔ ' + item.id + ' is currently ' + item.status + ' and is not available for borrowing.'); return; }
     var avail=eqAvailableQty(item);
     var qtyEl=document.getElementById('eqBorrowQty');
-    var borrowQty=Math.floor(Number(qtyEl?qtyEl.value:1));
-    if(!Number.isFinite(borrowQty)||borrowQty<1){fail('⛔ Borrow Quantity must be at least 1.');return;}
-    if(borrowQty>avail){fail('⛔ Only '+avail+' of '+eqRegisteredQty(item)+' unit(s) are currently available.');validateEquipBorrowQty();return;}
+    var qtyRaw=String(qtyEl?qtyEl.value:'').trim();
+    var borrowQty=Number(qtyRaw);
+    if(qtyRaw===''||!Number.isFinite(borrowQty)||borrowQty<1||Math.floor(borrowQty)!==borrowQty){
+        fail('⛔ Enter a whole-number Borrow Quantity of at least 1.');
+        if(qtyEl) qtyEl.focus();
+        return;
+    }
+    if(borrowQty>avail){
+        fail('⛔ Only '+avail+' of '+eqRegisteredQty(item)+' unit(s) are currently available. Enter a quantity from 1 to '+avail+'.');
+        if(qtyEl){qtyEl.focus();qtyEl.select();}
+        validateEquipBorrowQty(false);
+        return;
+    }
 
     var expVal = document.getElementById('eqExpectedReturn').value;
     var expMs = eqDateInputToMs(expVal);
