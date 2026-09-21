@@ -111,7 +111,7 @@ function applyVisibility(){
     set('bookInvBtn',isLibrarianRole||isAdmin);
     set('borrowBtn',isLibrarianRole||isAdmin);
     set('reservationTabBtn',isLibrarianRole||isAdmin);
-    if(isAdmin){set('liveTabBtn',true);set('clientInventoryTabBtn',true);set('visitorTabBtn',true);set('reportsTabBtn',true);set('certificatesTabBtn',true);set('eipcrfTabBtn',true);set('equipBtn',true);set('qlogSettingsNav',true);}
+    if(isAdmin){set('liveTabBtn',true);set('clientInventoryTabBtn',true);set('visitorTabBtn',!!(document.getElementById('visitors')&&document.getElementById('visitors').classList.contains('active')));set('reportsTabBtn',true);set('certificatesTabBtn',true);set('eipcrfTabBtn',true);set('equipBtn',true);set('qlogSettingsNav',true);}
     else{
       var guardRole=(typeof window.isGuardWatchmanSession==='function')?!!window.isGuardWatchmanSession():role.indexOf('guard')>=0;
       var settingsNav=document.getElementById('qlogSettingsNav');if(settingsNav)settingsNav.style.display=guardRole?'none':'inline-block';
