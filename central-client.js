@@ -68,6 +68,7 @@
   function currentInCharge(){ return normalize((window.currentSession||{}).inCharge || ''); }
   function currentDesignation(){ return normalize((window.currentSession||{}).designation || ''); }
   function currentRole(){ return normalize((window.currentSession||{}).role || ''); }
+  function isCentralAdminRole(){ return currentRole().toLowerCase()==='central_admin'; }
   function allowedDatasetsForCurrentRole(){
     var role=currentRole().toLowerCase(),fac=currentFacility().toUpperCase(),des=currentDesignation().toUpperCase(),text=(role+' '+fac+' '+des).toUpperCase();
     if(role==='superadmin'||role==='admin')return new Set(SCHOOL_WIDE_DATASETS);
@@ -852,6 +853,33 @@
     }finally{state.authInFlight=false;}
   }
 
+  async function connectAsCentralAdmin(adminToken){
+    adminToken=String(adminToken||'').trim();
+    if(!adminToken)throw new Error('ADMIN_AUTH_REQUIRED');
+    if(state.authInFlight)return false;
+    state.authInFlight=true;setStatus('Authenticating CENTRAL ADMIN…','warn');
+    try{
+      var reachable=await checkServerHealth(3500);if(!reachable)throw new Error('CENTRAL_API_UNREACHABLE');
+      var d=await fetch(API_BASE+'/api/auth/admin-device',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+adminToken},body:JSON.stringify({sourceId:state.sourceId}),cache:'no-store'});
+      var j=await d.json().catch(function(){return{};});if(!d.ok||!j.ok)throw new Error(j.error||('HTTP '+d.status));
+      var scope=currentScope(),facility=currentFacility();
+      state.token=j.token;state.activeFacility=facility;state.activeProfileKey=j.profileKey||scopeId();state.activeScope=scope;state.initialSyncNoticeShown=false;state.lastSuccessReceipt='';
+      // CENTRAL ADMIN device authorization is intentionally session-only.
+      // Do not overwrite the ordinary Office/Laboratory device token saved on this browser.
+      // This preserves the existing Office Access Code boundary when the admin logs out.
+      localStorage.setItem(CENTRAL_RESET_GENERATION_KEY,String(Number(j.centralResetGeneration||0)));
+      state.pending=loadPending(scope);
+      // Never carry another user's live cache into the Central Admin profile.
+      state.suppress=true;
+      try{if(hasProfileCache(scope))loadProfileCache(scope);else PROFILE_DATASETS.forEach(function(n){setDatasetLocal(n,[],false);});}finally{state.suppress=false;}
+      await activateSync('existing');
+      await fullProfileReconcile();saveProfileCache(scope);
+      connectSocket();closeAuth();setStatus('CENTRAL ADMIN connected to Central.','ok');
+      try{window.dispatchEvent(new Event('qlog:central-ready'));window.dispatchEvent(new Event('qlog:central-profile-switched'));}catch(e){}
+      return true;
+    }finally{state.authInFlight=false;}
+  }
+
   async function switchProfile(){
     var scope=currentScope(); if(!scope||state.switchingProfile)return;
     state.switchingProfile=true;
@@ -1066,6 +1094,18 @@
     var facility=currentFacility(),inCharge=currentInCharge(),scope=currentScope();
     if(!facility||!inCharge){setStatus('Waiting for In-Charge profile…','warn');setTimeout(init,250);return;}
     state.activeFacility=facility;
+    if(currentRole().toLowerCase()==='personnel'){
+      setStatus('Professional upload account — operational Central sync is not required.','ok');
+      return;
+    }
+    if(isCentralAdminRole()){
+      var adminToken='';try{adminToken=sessionStorage.getItem('qlogCentralAdminToken')||'';}catch(e){}
+      if(adminToken){
+        try{await connectAsCentralAdmin(adminToken);}catch(e){setStatus('CENTRAL ADMIN authentication required','warn');}
+      }else setStatus('CENTRAL ADMIN authentication required','warn');
+      setInterval(function(){installSaveHooks();if(navigator.onLine&&state.token){if(state.pending.size)sync(false);else reconcile();connectSocket();}},5000);
+      return;
+    }
     if(state.activeProfileKey && state.activeProfileKey!==scopeId() && state.token){
       // Keep the authenticated device session; switchProfile() will perform a fast server-side profile handoff.
     } else if(state.activeProfileKey && state.activeProfileKey!==scopeId()){
@@ -1197,6 +1237,7 @@
 
   window.QLogCentral={
     connect:function(){var i=document.getElementById('qlogCentralCode');if(i)connectWithCode(i.value.trim());},
+    connectAdmin:connectAsCentralAdmin,
     closeAuth:closeAuth,
     sync:function(){schedule(SYNC_KEYS);sync(true);if(hasOfflineQueue(currentScope()))showOfflineReview();},
     syncDatasets:function(names){schedule(names||SYNC_KEYS);sync(false);if(hasOfflineQueue(currentScope()))showOfflineReview();},

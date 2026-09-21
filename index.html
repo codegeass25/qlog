@@ -1010,8 +1010,37 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
         <datalist id="libDesignationList"></datalist>
         <button style="width:100%; margin-top:25px; padding:14px;" onclick="saveLibrarianConfigAndContinue()">Save & Continue</button>
     </div>
+    <div class="startup-card" id="stepRoleChoice" style="display:none; max-width:560px;">
+        <h3>Select Access Type</h3>
+        <p style="margin-bottom:16px;">Choose the role that matches your current assignment.</p>
+        <div style="display:grid;grid-template-columns:1fr;gap:10px;">
+            <button style="padding:14px;" onclick="showInChargeConfig()">A. Laboratory / Office / Facility In-Charge</button>
+            <button style="padding:14px;background:#475569;" onclick="showPersonnelConfig()">B. Non Office / Laboratory Personnel</button>
+            <button style="padding:14px;background:#0f172a;" onclick="showCentralAdminLogin()">C. CENTRAL ADMIN</button>
+        </div>
+    </div>
+    <div class="startup-card config-form" id="stepPersonnel" style="display:none;">
+        <h3>Non Office / Laboratory Personnel</h3>
+        <label>Name:</label>
+        <input list="personnelOnlyList" id="cbPersonnelName" placeholder="e.g. Juan Dela Cruz">
+        <datalist id="personnelOnlyList"></datalist>
+        <label>Position / Designation:</label>
+        <input list="personnelPositionList" id="cbPersonnelPosition" placeholder="e.g. Teacher I, Teacher II, Teacher III">
+        <datalist id="personnelPositionList"></datalist>
+        <button style="width:100%; margin-top:25px; padding:14px;" onclick="savePersonnelConfigAndContinue()">Save & Continue</button>
+        <button style="width:100%; margin-top:8px; padding:11px; background:#64748b;" onclick="showRoleChoice()">Back</button>
+    </div>
+    <div class="startup-card config-form" id="stepCentralAdmin" style="display:none;">
+        <h3>CENTRAL ADMIN</h3>
+        <p style="font-size:13px;color:#64748b;">Enter the Central Administrator password.</p>
+        <label>Password:</label>
+        <input type="password" id="centralAdminStartupPassword" autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false" onkeypress="if(event.key==='Enter') submitCentralAdminStartup()">
+        <p class="auth-err" id="centralAdminStartupError"></p>
+        <button style="width:100%; margin-top:14px; padding:14px; background:#0f172a;" onclick="submitCentralAdminStartup()">Login</button>
+        <button style="width:100%; margin-top:8px; padding:11px; background:#64748b;" onclick="showRoleChoice()">Back</button>
+    </div>
     <div class="startup-card config-form" id="step2">
-        <h3>Laboratory / Office Configuration</h3>
+        <h3>Laboratory / Office / Facility Configuration</h3>
         <label>Laboratory/Office:</label>
         <input list="facilitiesList" id="cbFacility" placeholder="e.g. Science Laboratory">
         <datalist id="facilitiesList"></datalist>
@@ -1059,7 +1088,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
 </div>
 
 <div class="nav">
-    <button class="active-nav" onclick="showTab('live', this)">📊 Live Monitor</button>
+    <button id="liveTabBtn" class="active-nav" onclick="showTab('live', this)">📊 Live Monitor</button>
     <button id="clientInventoryTabBtn" onclick="showTab('inventory', this)" style="display:none">👥 Client Inventory</button>
     <button id="certificatesTabBtn" onclick="showTab('certificates', this)">🎓 Teacher Certificates</button>
     <button id="eipcrfTabBtn" onclick="showTab('eipcrf', this)">🧭 eIPCRF & TNA</button>
@@ -1068,7 +1097,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
     <button id="borrowBtn" onclick="showTab('borrow', this)">📖 Book Borrowing</button>
     <button id="reservationTabBtn" onclick="showTab('reservationsTab', this)">⏳ Queue Waiting List</button>
     <button id="equipBtn" onclick="showTab('equipment', this)" style="display:none">🧰 Equipment Borrowing</button>
-    <button onclick="showTab('reports', this)">📈 Reports</button>
+    <button id="reportsTabBtn" onclick="showTab('reports', this)">📈 Reports</button>
 </div>
 
 <div id="live" class="tab active">
@@ -1147,7 +1176,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
         </div>
         <div id="certUploadMsg" class="file-meta"></div>
     </div>
-    <div class="card">
+    <div class="card" id="certAdminPanel">
         <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;">
             <h3 style="margin:0">Certificate Upload Log</h3>
             <input id="certSearch" placeholder="Search teacher, title, issuer, type..." style="max-width:360px;margin:0" oninput="renderCertificateRows()">
@@ -1172,11 +1201,11 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
         </div>
         <div id="ipcrfUploadMsg" class="file-meta"></div>
     </div>
-    <div class="card">
+    <div class="card" id="eipcrfAdminPanel">
         <h3>eIPCRF Upload Log</h3>
         <div class="full-table"><table><thead><tr><th>No.</th><th>Teacher</th><th>School Year</th><th>File</th><th>Analysis</th><th>Uploaded</th><th>Action</th></tr></thead><tbody id="ipcrfTbl"></tbody></table></div>
     </div>
-    <div class="card tna-highlight">
+    <div class="card tna-highlight" id="tnaAdminPanel">
         <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">
             <div><h3 style="margin:0">📌 Consolidated Training Needs Assessment (TNA)</h3><p style="margin-top:5px">Priority is based on the number of teachers whose latest eIPCRF contains the same Development Need.</p></div>
             <button onclick="generateTNA()" style="padding:13px 20px">GENERATE TNA</button>
@@ -1817,7 +1846,6 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
 
         <span style="flex-grow:1"></span>
         <button style="background:#0f766e;" onclick="rebuildMyOfficeData()">♻ Rebuild My Office Data</button>
-        <button style="background:#334155;" onclick="openCentralAdmin()">🏫 Central Admin</button>
     </div>
 </div>
 <div id="reportSummary" class="report-summary-grid"></div>
@@ -1869,12 +1897,14 @@ function isGuardWatchmanSession(){
     return guardIdentity || guardFacility;
 }
 function qlogProfessionalFeaturesAllowed(){ return !isGuardWatchmanSession(); }
+function qlogProfessionalAdminAllowed(){ return isCentralAdminSession(); }
 function applyProfessionalModuleVisibility(){
     var allowed=qlogProfessionalFeaturesAllowed();
     var certBtn=document.getElementById('certificatesTabBtn');
     var eipBtn=document.getElementById('eipcrfTabBtn');
     if(certBtn) certBtn.style.display=allowed?'':'none';
     if(eipBtn) eipBtn.style.display=allowed?'':'none';
+    applyProfessionalAdminVisibility();
     if(!allowed){
         var cert=document.getElementById('certificates'), eip=document.getElementById('eipcrf');
         if((cert&&cert.classList.contains('active'))||(eip&&eip.classList.contains('active'))){
@@ -2238,12 +2268,13 @@ function verifySuperPassword(pw){
 }
 
 function initSuperAuth(){
-    // Installation gate must be cleared first (blocks refresh / direct calls).
+    // Installation gate remains unchanged. The local Superadmin password is now
+    // a one-time setup / protected-maintenance credential, not a mandatory
+    // login before every staff startup.
     if(!_installActivated){
         if(typeof isInstallActivated === 'function' && isInstallActivated() && _gateCfg()){ _installActivated = true; }
         else { initInstallGate(); return; }
     }
-    // Auto-hide boot splash
     setTimeout(function() {
         var splash = document.getElementById('bootSplash');
         if (splash) {
@@ -2252,17 +2283,17 @@ function initSuperAuth(){
         }
     }, 2000);
     var ov = document.getElementById('superAuthOverlay');
-    ov.style.display = 'flex';
     var rec = _authGetRecord();
     if(rec && rec.h){
-        document.getElementById('authLoginCard').style.display = 'block';
-        document.getElementById('authSetupCard').style.display = 'none';
-        setTimeout(function(){ var e=document.getElementById('authPassword'); if(e) e.focus(); }, 300);
-    } else {
-        document.getElementById('authLoginCard').style.display = 'none';
-        document.getElementById('authSetupCard').style.display = 'block';
-        setTimeout(function(){ var e=document.getElementById('authNewPass'); if(e) e.focus(); }, 300);
+        _superAuthed = true;
+        if(ov) ov.style.display = 'none';
+        initStartup();
+        return;
     }
+    if(ov) ov.style.display = 'flex';
+    document.getElementById('authLoginCard').style.display = 'none';
+    document.getElementById('authSetupCard').style.display = 'block';
+    setTimeout(function(){ var e=document.getElementById('authNewPass'); if(e) e.focus(); }, 300);
 }
 function _authUnlock(){
     _superAuthed = true;
@@ -2464,22 +2495,35 @@ function newQlogSyncId(){
     return 'SYNC-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,12);
 }
 
+function isCentralAdminSession(){ return !!(currentSession && String(currentSession.role||'').toLowerCase()==='central_admin'); }
+function isPersonnelOnlySession(){ return !!(currentSession && String(currentSession.role||'').toLowerCase()==='personnel'); }
+function getCentralAdminToken(){ try{return sessionStorage.getItem('qlogCentralAdminToken')||'';}catch(e){return '';} }
+
+function hideStartupCards(){
+    ['step1','stepLibrarian','stepRoleChoice','stepPersonnel','stepCentralAdmin','step2'].forEach(function(id){var e=document.getElementById(id);if(e)e.style.display='none';});
+}
 function initStartup() {
-    if(!_superAuthed) { initSuperAuth(); return; }
+    var adminSaved=null;
+    try{adminSaved=JSON.parse(sessionStorage.getItem('qlogCentralAdminSession')||'null');}catch(e){}
+    if(adminSaved && getCentralAdminToken()){
+        currentSession=adminSaved;
+        finalizeStartup(false);
+        if(window.QLogCentral&&typeof QLogCentral.connectAdmin==='function') setTimeout(function(){QLogCentral.connectAdmin(getCentralAdminToken());},50);
+        return;
+    }
     var savedSession = localStorage.getItem('savedSession');
     if (savedSession) {
-        currentSession = JSON.parse(savedSession);
-        finalizeStartup(currentSession.role === 'librarian');
-    } else {
-        document.getElementById('startupOverlay').style.display = 'flex';
-        document.getElementById('step1').style.display = 'block';
-        document.getElementById('stepLibrarian').style.display = 'none';
-        document.getElementById('step2').style.display = 'none';
+        try{currentSession = JSON.parse(savedSession);}catch(e){currentSession=null;}
+        if(currentSession && currentSession.role==='central_admin'){ localStorage.removeItem('savedSession'); currentSession=null; }
+        if(currentSession){ finalizeStartup(currentSession.role === 'librarian'); return; }
     }
+    document.getElementById('startupOverlay').style.display = 'flex';
+    hideStartupCards();
+    document.getElementById('step1').style.display = 'block';
 }
 
 function setLibrarianRole() {
-    document.getElementById('step1').style.display = 'none';
+    hideStartupCards();
     document.getElementById('stepLibrarian').style.display = 'block';
     populateDatalist('libPersonnelList', configData.personnel);
     populateDatalist('libDesignationList', configData.designations);
@@ -2494,18 +2538,67 @@ function saveLibrarianConfigAndContinue() {
     if(configData.personnel.indexOf(person) === -1) { configData.personnel.push(person); updated = true; }
     if(configData.designations.indexOf(desig) === -1) { configData.designations.push(desig); updated = true; }
     if(updated) localStorage.setItem('configData', JSON.stringify(configData));
-    
     currentSession = { facility: "School Library", inCharge: person, designation: desig, role: 'librarian' };
     localStorage.setItem('savedSession', JSON.stringify(currentSession));
     finalizeStartup(true);
 }
 
-function showConfigMenu() {
-    document.getElementById('step1').style.display = 'none';
+function showConfigMenu(){ showRoleChoice(); }
+function showRoleChoice(){
+    hideStartupCards();
+    document.getElementById('stepRoleChoice').style.display='block';
+}
+function showInChargeConfig() {
+    hideStartupCards();
     document.getElementById('step2').style.display = 'block';
     populateDatalist('facilitiesList', configData.facilities);
     populateDatalist('personnelList', configData.personnel);
     populateDatalist('designationList', configData.designations);
+}
+function showPersonnelConfig(){
+    hideStartupCards();
+    document.getElementById('stepPersonnel').style.display='block';
+    populateDatalist('personnelOnlyList',configData.personnel||[]);
+    populateDatalist('personnelPositionList',configData.designations||[]);
+}
+function savePersonnelConfigAndContinue(){
+    var name=document.getElementById('cbPersonnelName').value.trim();
+    var pos=document.getElementById('cbPersonnelPosition').value.trim();
+    if(!name||!pos){alert('Please fill in Name and Position / Designation.');return;}
+    var updated=false;
+    if(configData.personnel.indexOf(name)===-1){configData.personnel.push(name);updated=true;}
+    if(configData.designations.indexOf(pos)===-1){configData.designations.push(pos);updated=true;}
+    if(updated)localStorage.setItem('configData',JSON.stringify(configData));
+    currentSession={facility:'School Personnel',inCharge:name,designation:pos,role:'personnel'};
+    localStorage.setItem('savedSession',JSON.stringify(currentSession));
+    finalizeStartup(false);
+}
+function showCentralAdminLogin(){
+    hideStartupCards();
+    document.getElementById('stepCentralAdmin').style.display='block';
+    var p=document.getElementById('centralAdminStartupPassword'),e=document.getElementById('centralAdminStartupError');
+    if(p)p.value='';if(e)e.textContent='';setTimeout(function(){if(p)p.focus();},100);
+}
+async function submitCentralAdminStartup(){
+    var p=document.getElementById('centralAdminStartupPassword'),e=document.getElementById('centralAdminStartupError');
+    var pw=p?String(p.value||''):'';if(!pw){if(e)e.textContent='Please enter the Central Administrator password.';return;}
+    if(p)p.value='';
+    try{
+        var base='';try{base=(window.QLogCentral&&QLogCentral.getApiBase)?QLogCentral.getApiBase():(window.QLOG_API_BASE||'');}catch(_){base=window.QLOG_API_BASE||'';}
+        base=String(base||'').replace(/\/$/,'');
+        var r=await fetch(base+'/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw}),cache:'no-store'});
+        pw='';var d=await r.json().catch(function(){return{};});
+        if(!r.ok||!d.ok)throw new Error(d.error||'Central Administrator login failed.');
+        try{sessionStorage.setItem('qlogCentralAdminToken',d.token);}
+        catch(_){}
+        currentSession={facility:'CENTRAL ADMIN',inCharge:'Central Administrator',designation:'Central Administrator',role:'central_admin'};
+        try{sessionStorage.setItem('qlogCentralAdminSession',JSON.stringify(currentSession));}catch(_){}
+        localStorage.removeItem('savedSession');
+        if(e)e.textContent='';
+        finalizeStartup(false);
+        if(window.QLogCentral&&typeof QLogCentral.connectAdmin==='function') await QLogCentral.connectAdmin(d.token);
+        toast('✅ CENTRAL ADMIN authenticated.','green');
+    }catch(err){if(e)e.textContent=String(err&&err.message||err);toast('❌ CENTRAL ADMIN access denied.','red');}
 }
 
 function saveConfigAndContinue() {
@@ -2513,7 +2606,6 @@ function saveConfigAndContinue() {
     var inc = document.getElementById('cbInCharge').value.trim();
     var des = document.getElementById('cbDesignation').value.trim();
     if(!fac || !inc || !des) { alert("Please fill in all fields to continue."); return; }
-    
     currentSession = { facility: fac, inCharge: inc, designation: des, role: 'incharge' };
     localStorage.setItem('savedSession', JSON.stringify(currentSession));
     finalizeStartup(false);
@@ -2529,6 +2621,22 @@ function populateDatalist(id, list) {
     });
 }
 
+function applyQlogRoleNavigation(){
+    if(!currentSession)return;
+    var role=String(currentSession.role||'').toLowerCase(),isAdmin=role==='central_admin',isPersonnel=role==='personnel';
+    var allIds=['liveTabBtn','clientInventoryTabBtn','certificatesTabBtn','eipcrfTabBtn','visitorTabBtn','bookInvBtn','borrowBtn','reservationTabBtn','equipBtn','reportsTabBtn','qlogSettingsNav'];
+    if(isPersonnel){
+        allIds.forEach(function(id){var el=document.getElementById(id);if(el)el.style.display=(id==='certificatesTabBtn'||id==='eipcrfTabBtn')?'inline-block':'none';});
+    }else if(isAdmin){
+        allIds.forEach(function(id){var el=document.getElementById(id);if(el)el.style.display='inline-block';});
+    }
+    applyProfessionalAdminVisibility();
+}
+function applyProfessionalAdminVisibility(){
+    var isAdmin=isCentralAdminSession();
+    ['certAdminPanel','eipcrfAdminPanel','tnaAdminPanel'].forEach(function(id){var el=document.getElementById(id);if(el)el.style.display=isAdmin?'':'none';});
+}
+
 function finalizeStartup(isLibrarian) {
     document.getElementById('startupOverlay').style.display = 'none';
     document.getElementById('facilityTitle').textContent = currentSession.facility.toUpperCase();
@@ -2536,7 +2644,9 @@ function finalizeStartup(isLibrarian) {
     document.getElementById('logoutBtn').style.display = 'flex';
     document.getElementById('changePwdBtn').style.display = 'flex';
     
-    var showLib = isLibrarian ? 'inline-block' : 'none';
+    var roleNow=String((currentSession&&currentSession.role)||'').toLowerCase();
+    var isAdminRole=roleNow==='central_admin', isPersonnelRole=roleNow==='personnel';
+    var showLib = (isLibrarian||isAdminRole) ? 'inline-block' : 'none';
     document.getElementById('bookInvBtn').style.display = showLib;
     document.getElementById('borrowBtn').style.display = showLib;
     document.getElementById('reservationTabBtn').style.display = showLib;
@@ -2564,11 +2674,17 @@ function finalizeStartup(isLibrarian) {
         setTimeout(function(){ try{ setScanMode('CAMERA'); }catch(e){} }, 180);
     } else if(scannerInput) scannerInput.focus();
     updateLiveMonitorClock();
+    applyQlogRoleNavigation();
+    if(isPersonnelRole){
+        var certBtn=document.getElementById('certificatesTabBtn');
+        if(certBtn) setTimeout(function(){showTab('certificates',certBtn);},30);
+    }
 }
 
 function logoutSession() {
     if(confirm("Are you sure you want to securely logout?")) {
         localStorage.removeItem('savedSession');
+        try{sessionStorage.removeItem('qlogCentralAdminToken');sessionStorage.removeItem('qlogCentralAdminSession');}catch(e){}
         window.location.reload();
     }
 }
@@ -3373,7 +3489,7 @@ function submitReportsAuth(){
 
 var _reportsAuthorized = false;
 function showTab(id, btn){
-    if (id === 'reports' && !_reportsAuthorized) {
+    if (id === 'reports' && !_reportsAuthorized && !isCentralAdminSession()) {
         openReportsAuth(btn);
         return;
     }
@@ -7854,20 +7970,21 @@ function qlogFmtDate(v){if(!v)return '--';try{var d=new Date(v);return isNaN(d.g
 function qlogIsTeacher(p){var c=String((p&&p.category)||'').toUpperCase().replace(/[_-]+/g,' ').replace(/\s+/g,' ').trim();return c==='TEACHER'||c==='TEACHING'||c==='TEACHING PERSONNEL'||c==='FACULTY';}
 function qlogTeacherList(){return people.filter(qlogIsTeacher).sort(function(a,b){return String(a.name||'').localeCompare(String(b.name||''));});}
 function qlogTeacherLabel(t){return String(t.name||'Unnamed Teacher')+' ('+String(t.id||'No ID')+')';}
-function renderTeacherSelectors(){var bound=qlogBoundTeacher();['certTeacher','ipcrfTeacher'].forEach(function(id){var hidden=document.getElementById(id),input=document.getElementById(id+'Search');if(!hidden||!input)return;if(bound&&!hidden.value){hidden.value=bound.id;input.value=qlogTeacherLabel(bound);}var t=qlogTeacherList().find(function(x){return String(x.id)===String(hidden.value);});if(t)input.value=qlogTeacherLabel(t);else if(hidden.value){hidden.value='';input.value='';}qlogFilterTeacherCombo(id);});}
+function qlogPersonnelTeacher(){if(!isPersonnelOnlySession())return null;var n=String((currentSession&&currentSession.inCharge)||'').trim();if(!n)return null;var hit=qlogTeacherList().find(function(t){return String(t.name||'').trim().toLowerCase().replace(/\s+/g,' ')===n.toLowerCase().replace(/\s+/g,' ');});if(hit)return hit;var id='PERSONNEL-'+n.toUpperCase().replace(/[^A-Z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,80);return {id:id||('PERSONNEL-'+Date.now()),name:n,category:'TEACHER'};}
+function renderTeacherSelectors(){var bound=qlogBoundTeacher()||qlogPersonnelTeacher();['certTeacher','ipcrfTeacher'].forEach(function(id){var hidden=document.getElementById(id),input=document.getElementById(id+'Search');if(!hidden||!input)return;if(bound){hidden.value=bound.id;input.value=qlogTeacherLabel(bound);if(isPersonnelOnlySession()){input.readOnly=true;input.setAttribute('aria-readonly','true');var combo=document.getElementById(id+'Combo');if(combo)combo.classList.remove('open');return;}}var t=qlogTeacherList().find(function(x){return String(x.id)===String(hidden.value);});if(t)input.value=qlogTeacherLabel(t);else if(hidden.value){hidden.value='';input.value='';}qlogFilterTeacherCombo(id);});}
 function qlogFilterTeacherCombo(id){var combo=document.getElementById(id+'Combo'),menu=document.getElementById(id+'Menu'),input=document.getElementById(id+'Search'),hidden=document.getElementById(id);if(!combo||!menu||!input)return;var q=input.value.toLowerCase().trim(),teachers=qlogTeacherList();if(hidden&&hidden.value){var selected=teachers.find(function(t){return String(t.id)===String(hidden.value);});if(selected&&q===qlogTeacherLabel(selected).toLowerCase())q='';else if(selected&&input.value!==qlogTeacherLabel(selected))hidden.value='';}var rows=teachers.filter(function(t){return !q||[t.name,t.id,t.category].join(' ').toLowerCase().indexOf(q)>=0;}).slice(0,80);menu.innerHTML=rows.length?rows.map(function(t){return '<button type="button" class="teacher-option" onclick="qlogChooseTeacher(\''+id+'\',\''+qlogEsc(t.id).replace(/&#39;/g,"\\'")+'\')"><b>'+qlogEsc(t.name)+'</b><small>'+qlogEsc(t.id)+' • '+qlogEsc(t.category||'TEACHING')+'</small></button>';}).join(''):'<div class="teacher-empty">No matching teacher. Check Client Inventory category (TEACHING/TEACHER).</div>';}
 function qlogOpenTeacherCombo(id){var combo=document.getElementById(id+'Combo');if(combo){document.querySelectorAll('.teacher-combo.open').forEach(function(x){if(x!==combo)x.classList.remove('open');});combo.classList.add('open');qlogFilterTeacherCombo(id);}}
 function qlogChooseTeacher(id,teacherId){var t=qlogTeacherList().find(function(x){return String(x.id)===String(teacherId);});if(!t)return;document.getElementById(id).value=t.id;document.getElementById(id+'Search').value=qlogTeacherLabel(t);document.getElementById(id+'Combo').classList.remove('open');}
-function selectedTeacher(selectId){var el=document.getElementById(selectId);if(!el||!el.value)return null;return qlogTeacherList().find(function(p){return String(p.id)===String(el.value);})||null;}
+function selectedTeacher(selectId){var el=document.getElementById(selectId);if(isPersonnelOnlySession())return qlogPersonnelTeacher();if(!el||!el.value)return null;return qlogTeacherList().find(function(p){return String(p.id)===String(el.value);})||null;}
 function qlogBoundTeacher(){var a=qlogActor(),nm=String(a.name||'').trim().toLowerCase().replace(/\s+/g,' ');if(!nm)return null;return qlogTeacherList().find(function(t){return String(t.name||'').trim().toLowerCase().replace(/\s+/g,' ')===nm;})||null;}
 document.addEventListener('click',function(e){document.querySelectorAll('.teacher-combo.open').forEach(function(c){if(!c.contains(e.target))c.classList.remove('open');});});
-async function qlogApi(url,opts){opts=opts||{};opts.headers=qlogActorHeaders(opts.headers||{});opts.headers['X-QLog-Client-Id']=window.QLOG_CLIENT_ID||'';opts.cache='no-store';var r=await fetch(qlogApiUrl(url),opts),data=null;try{data=await r.json();}catch(e){data={ok:false,error:'Invalid server response.'};}if(!r.ok||!data.ok)throw new Error(data.error||('HTTP '+r.status));return data;}
-async function qlogOpenProtectedFile(path){try{var h=qlogActorHeaders({'X-QLog-Client-Id':window.QLOG_CLIENT_ID||''});var r=await fetch(qlogApiUrl(path),{headers:h,cache:'no-store'});if(!r.ok){var msg='Unable to open file.';try{var j=await r.json();msg=j.error||msg;}catch(e){try{msg=await r.text()||msg;}catch(_){} }throw new Error(msg);}var blob=await r.blob(),url=URL.createObjectURL(blob);var w=window.open(url,'_blank');if(!w){var a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener';document.body.appendChild(a);a.click();a.remove();}setTimeout(function(){URL.revokeObjectURL(url);},60000);}catch(e){alert(e.message);}}
-async function uploadCertificate(){var teacher=selectedTeacher('certTeacher'),fileEl=document.getElementById('certFile'),msg=document.getElementById('certUploadMsg');if(!teacher){alert('Select a teacher first.');return;}if(!fileEl.files||!fileEl.files[0]){alert('Select a certificate file.');return;}var fd=new FormData();fd.append('teacherId',teacher.id);fd.append('teacherName',teacher.name);fd.append('title',document.getElementById('certTitle').value.trim());fd.append('certificateType',document.getElementById('certType').value.trim());fd.append('issuer',document.getElementById('certIssuer').value.trim());fd.append('issueDate',document.getElementById('certIssueDate').value);fd.append('notes',document.getElementById('certNotes').value.trim());fd.append('file',fileEl.files[0]);msg.textContent='Uploading certificate...';try{await qlogApi('./api/certificates',{method:'POST',body:fd});msg.textContent='✅ Certificate uploaded and added to the log.';fileEl.value='';document.getElementById('certTitle').value='';document.getElementById('certNotes').value='';toast('Certificate uploaded successfully','green');await loadCertificates();}catch(e){msg.textContent='❌ '+e.message;toast('Certificate upload failed','red');}}
+async function qlogApi(url,opts){opts=opts||{};opts.headers=qlogActorHeaders(opts.headers||{});opts.headers['X-QLog-Client-Id']=window.QLOG_CLIENT_ID||'';var at=getCentralAdminToken();if(isCentralAdminSession()&&at)opts.headers['Authorization']='Bearer '+at;opts.cache='no-store';var r=await fetch(qlogApiUrl(url),opts),data=null;try{data=await r.json();}catch(e){data={ok:false,error:'Invalid server response.'};}if(!r.ok||!data.ok)throw new Error(data.error||('HTTP '+r.status));return data;}
+async function qlogOpenProtectedFile(path){try{var h=qlogActorHeaders({'X-QLog-Client-Id':window.QLOG_CLIENT_ID||''});var at=getCentralAdminToken();if(isCentralAdminSession()&&at)h['Authorization']='Bearer '+at;var r=await fetch(qlogApiUrl(path),{headers:h,cache:'no-store'});if(!r.ok){var msg='Unable to open file.';try{var j=await r.json();msg=j.error||msg;}catch(e){try{msg=await r.text()||msg;}catch(_){} }throw new Error(msg);}var blob=await r.blob(),url=URL.createObjectURL(blob);var w=window.open(url,'_blank');if(!w){var a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener';document.body.appendChild(a);a.click();a.remove();}setTimeout(function(){URL.revokeObjectURL(url);},60000);}catch(e){alert(e.message);}}
+async function uploadCertificate(){var teacher=selectedTeacher('certTeacher'),fileEl=document.getElementById('certFile'),msg=document.getElementById('certUploadMsg');if(!teacher){alert('Select a teacher first.');return;}if(!fileEl.files||!fileEl.files[0]){alert('Select a certificate file.');return;}var fd=new FormData();fd.append('teacherId',teacher.id);fd.append('teacherName',teacher.name);fd.append('title',document.getElementById('certTitle').value.trim());fd.append('certificateType',document.getElementById('certType').value.trim());fd.append('issuer',document.getElementById('certIssuer').value.trim());fd.append('issueDate',document.getElementById('certIssueDate').value);fd.append('notes',document.getElementById('certNotes').value.trim());fd.append('file',fileEl.files[0]);msg.textContent='Uploading certificate...';try{await qlogApi('./api/certificates',{method:'POST',body:fd});msg.textContent='✅ Certificate uploaded and added to the log.';fileEl.value='';document.getElementById('certTitle').value='';document.getElementById('certNotes').value='';toast('Certificate uploaded successfully','green');if(qlogProfessionalAdminAllowed())await loadCertificates();}catch(e){msg.textContent='❌ '+e.message;toast('Certificate upload failed','red');}}
 async function loadCertificates(){var tbody=document.getElementById('certTbl');if(!tbody)return;try{var bt=qlogBoundTeacher(),url='./api/certificates'+(bt?('?teacherId='+encodeURIComponent(bt.id)):'');var d=await qlogApi(url);qlogCertificates=d.certificates||[];renderCertificateRows();}catch(e){tbody.innerHTML='<tr><td colspan="8">Unable to load certificate log: '+qlogEsc(e.message)+'</td></tr>';}}
 function renderCertificateRows(){var tbody=document.getElementById('certTbl');if(!tbody)return;var q=(document.getElementById('certSearch')||{}).value||'';q=q.toLowerCase();var rows=qlogCertificates.filter(function(c){return !q||[c.teacher_name,c.title,c.certificate_type,c.issuer,c.original_name,c.uploaded_by_name].join(' ').toLowerCase().indexOf(q)>=0;});if(!rows.length){tbody.innerHTML='<tr><td colspan="8">No certificate uploads found.</td></tr>';return;}tbody.innerHTML=rows.map(function(c,i){var owner=c.uploaded_by_name?'<div class="file-meta">Uploaded by: '+qlogEsc(c.uploaded_by_name)+'</div>':'<div class="file-meta">Legacy upload: uploader unknown</div>';var del=c.can_delete?'<button style="padding:6px 9px;background:#dc2626" onclick="deleteCertificate('+c.id+')">Delete</button>':'<span class="file-meta">Only uploader can delete</span>';return '<tr><td>'+(i+1)+'</td><td><b>'+qlogEsc(c.teacher_name)+'</b><div class="file-meta">'+qlogEsc(c.teacher_id)+'</div></td><td>'+qlogEsc(c.title)+'<div class="file-meta">'+qlogEsc(c.original_name)+'</div></td><td>'+qlogEsc(c.certificate_type||'--')+'<div class="file-meta">'+qlogEsc(c.issuer||'--')+'</div></td><td>'+qlogEsc(c.issue_date||'--')+'</td><td>'+qlogEsc(qlogFmtDate(c.uploaded_at))+owner+'</td><td><button style="padding:6px 9px" onclick="qlogOpenProtectedFile(\'/api/certificates/'+c.id+'/file\')">Open</button></td><td>'+del+'</td></tr>';}).join('');}
 async function deleteCertificate(id){if(!confirm('Delete this certificate record and its uploaded file?'))return;try{await qlogApi('./api/certificates/'+id,{method:'DELETE'});toast('Certificate deleted','green');await loadCertificates();}catch(e){alert(e.message);}}
-async function uploadEipcrf(){var teacher=selectedTeacher('ipcrfTeacher'),fileEl=document.getElementById('ipcrfFile'),msg=document.getElementById('ipcrfUploadMsg');if(!teacher){alert('Select a teacher first.');return;}if(!fileEl.files||!fileEl.files[0]){alert('Select an eIPCRF Excel/CSV file.');return;}var file=fileEl.files[0],ext=(file.name.split('.').pop()||'').toLowerCase();if(['xlsx','xlsm','xls','csv'].indexOf(ext)<0){alert('eIPCRF accepts .xlsx, .xlsm, .xls, or .csv files.');return;}msg.textContent='Uploading to the central server and analyzing PART 4-IDP Development Needs...';try{var fd=new FormData();fd.append('teacherId',teacher.id);fd.append('teacherName',teacher.name);fd.append('schoolYear',document.getElementById('ipcrfSY').value.trim());fd.append('file',file);var d=await qlogApi('/api/eipcrf',{method:'POST',body:fd});var n=(d.developmentNeeds||[]).length;msg.textContent=n?'✅ Server analysis complete: '+n+' Development Need(s) detected.':'⚠ Uploaded, but the server found no finalized Development Needs. '+((d.upload&&d.upload.parse_message)||'');fileEl.value='';toast(n?'eIPCRF analyzed on central server':'eIPCRF uploaded - no finalized Development Needs',n?'green':'yellow');await loadEipcrfUploads();if(typeof loadTNAPreview==='function')await loadTNAPreview();}catch(e){msg.textContent='❌ '+e.message;toast('eIPCRF upload failed','red');}}
+async function uploadEipcrf(){var teacher=selectedTeacher('ipcrfTeacher'),fileEl=document.getElementById('ipcrfFile'),msg=document.getElementById('ipcrfUploadMsg');if(!teacher){alert('Select a teacher first.');return;}if(!fileEl.files||!fileEl.files[0]){alert('Select an eIPCRF Excel/CSV file.');return;}var file=fileEl.files[0],ext=(file.name.split('.').pop()||'').toLowerCase();if(['xlsx','xlsm','xls','csv'].indexOf(ext)<0){alert('eIPCRF accepts .xlsx, .xlsm, .xls, or .csv files.');return;}msg.textContent='Uploading to the central server and analyzing PART 4-IDP Development Needs...';try{var fd=new FormData();fd.append('teacherId',teacher.id);fd.append('teacherName',teacher.name);fd.append('schoolYear',document.getElementById('ipcrfSY').value.trim());fd.append('file',file);var d=await qlogApi('/api/eipcrf',{method:'POST',body:fd});var n=(d.developmentNeeds||[]).length;msg.textContent=n?'✅ Server analysis complete: '+n+' Development Need(s) detected.':'⚠ Uploaded, but the server found no finalized Development Needs. '+((d.upload&&d.upload.parse_message)||'');fileEl.value='';toast(n?'eIPCRF analyzed on central server':'eIPCRF uploaded - no finalized Development Needs',n?'green':'yellow');if(qlogProfessionalAdminAllowed()){await loadEipcrfUploads();if(typeof loadTNAPreview==='function')await loadTNAPreview();}}catch(e){msg.textContent='❌ '+e.message;toast('eIPCRF upload failed','red');}}
 async function loadEipcrfUploads(){var tbody=document.getElementById('ipcrfTbl');if(!tbody)return;try{var bt=qlogBoundTeacher(),url='./api/eipcrf'+(bt?('?teacherId='+encodeURIComponent(bt.id)):'');var d=await qlogApi(url);qlogEipcrfUploads=d.uploads||[];renderEipcrfRows();}catch(e){tbody.innerHTML='<tr><td colspan="7">Unable to load eIPCRF uploads: '+qlogEsc(e.message)+'</td></tr>';}}
 function renderEipcrfRows(){var tbody=document.getElementById('ipcrfTbl');if(!tbody)return;if(!qlogEipcrfUploads.length){tbody.innerHTML='<tr><td colspan="7">No eIPCRF uploads found.</td></tr>';return;}tbody.innerHTML=qlogEipcrfUploads.map(function(u,i){var cls=u.parse_status==='PARSED'?'ok':(u.parse_status==='NO_NEEDS_FOUND'?'warn':'bad');var label=u.parse_status==='PARSED'?'PARSED: '+u.extracted_count+' NEED(S)':u.parse_status.replace(/_/g,' ');var owner=u.uploaded_by_name?'<div class="file-meta">Uploaded by: '+qlogEsc(u.uploaded_by_name)+'</div>':'<div class="file-meta">Legacy upload: uploader unknown</div>';var del=u.can_delete?'<button style="padding:6px 9px;background:#dc2626" onclick="deleteEipcrf('+u.id+')">Delete</button>':'<span class="file-meta">Only uploader can delete</span>';return '<tr><td>'+(i+1)+'</td><td><b>'+qlogEsc(u.teacher_name)+'</b><div class="file-meta">'+qlogEsc(u.teacher_id)+'</div></td><td>'+qlogEsc(u.school_year||'--')+'</td><td>'+qlogEsc(u.original_name)+'<br><button style="padding:5px 8px;margin-top:5px" onclick="qlogOpenProtectedFile(\'/api/eipcrf/'+u.id+'/file\')">Open File</button></td><td><span class="status-pill '+cls+'">'+qlogEsc(label)+'</span><div class="file-meta" style="margin-top:5px">'+qlogEsc(u.parse_message||'')+'</div>'+(Number(u.extracted_count)>0?'<button style="padding:5px 8px;margin-top:5px;background:#475569" onclick="viewEipcrfNeeds('+u.id+')">View Needs</button>':'')+'<button style="padding:5px 8px;margin-top:5px;margin-left:5px;background:#334155" onclick="viewEipcrfAnalysis('+u.id+')">Analysis</button>'+'</td><td>'+qlogEsc(qlogFmtDate(u.uploaded_at))+owner+'</td><td>'+del+'</td></tr>';}).join('');}
 async function viewEipcrfNeeds(id){try{var d=await qlogApi('/api/eipcrf/'+id+'/needs');var list=d.developmentNeeds||[];var msg=list.length?'Extracted Development Needs:\n\n'+list.map(function(x,i){return(i+1)+'. '+x.need_text+(x.need_group?' ['+x.need_group+']':'')+(x.score!=null?' - score '+x.score:'');}).join('\n'):'No extracted Development Needs.';alert(msg);}catch(e){alert(e.message);}}
@@ -7902,7 +8019,7 @@ window.addEventListener('load', async function(){
         if(typeof equipLogs!=='undefined')equipLogs=JSON.parse(localStorage.getItem('equipLogs')||'[]');
     }catch(e){}
     try{renderPeople();renderLogs();renderReservations();if(typeof checkOverdueBooks==='function')checkOverdueBooks();if(typeof renderBorrow==='function')renderBorrow();if(typeof renderBookInventory==='function')renderBookInventory();if(typeof refreshEquipmentUI==='function')refreshEquipmentUI();}catch(e){}
-    try{applyProfessionalModuleVisibility();if(qlogProfessionalFeaturesAllowed()){renderTeacherSelectors();loadCertificates();loadEipcrfUploads();loadTNAPreview();}}catch(e){}
+    try{applyProfessionalModuleVisibility();applyQlogRoleNavigation();if(qlogProfessionalFeaturesAllowed()){renderTeacherSelectors();if(qlogProfessionalAdminAllowed()){loadCertificates();loadEipcrfUploads();loadTNAPreview();}}}catch(e){}
 });
 window.addEventListener('qlog:central-ready',function(){
     try{renderPeople();renderLogs();renderReservations();if(typeof renderBookInventory==='function')renderBookInventory();if(typeof renderBorrow==='function')renderBorrow();if(typeof refreshEquipmentUI==='function')refreshEquipmentUI();}catch(e){}

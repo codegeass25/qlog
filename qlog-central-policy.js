@@ -87,8 +87,9 @@ async function process(index){
   render();
 }
 function isGuard(){try{return typeof global.isGuardWatchmanSession==='function'&&global.isGuardWatchmanSession();}catch(e){return /guard|watchman|security/i.test(String((global.currentSession||{}).role||''));}}
+function isCentralAdmin(){return String((global.currentSession||{}).role||'').toLowerCase()==='central_admin';}
 function enforce(){
-  var inv=document.getElementById('clientInventoryTabBtn');if(inv)inv.style.display='none';
+  var inv=document.getElementById('clientInventoryTabBtn');if(inv)inv.style.display=isCentralAdmin()?'inline-block':'none';
   var settings=document.getElementById('qlogSettingsNav');if(settings&&isGuard())settings.style.display='none';
   var cert=document.getElementById('certificatesTabBtn'),eip=document.getElementById('eipcrfTabBtn');if(isGuard()){if(cert)cert.style.display='none';if(eip)eip.style.display='none';}
   document.querySelectorAll('button').forEach(function(b){if((b.textContent||'').indexOf('Teacher Clearance')>=0)b.textContent=(b.textContent||'').replace('Teacher Clearance','Clearance');});
@@ -98,7 +99,7 @@ function lockCentralClientInventory(){
   if(global.showTab&&!global.showTab.__qlogCentralInventoryLocked){
     var old=global.showTab;
     var fn=function(id,btn){
-      if(id==='inventory'){
+      if(id==='inventory'&&!isCentralAdmin()){
         if(global.toast)global.toast('Client Inventory is managed only from the Central Hub.','blue');
         return;
       }

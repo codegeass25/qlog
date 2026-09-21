@@ -99,44 +99,37 @@ function applyBranding(){var b=getBranding();document.title=FIXED_PRODUCT+(b.sch
 window.applyQlogBranding=applyBranding;
 
 function applyVisibility(){
-  /* Restore the ORIGINAL QLog role/tab behavior exactly:
-     - Live Monitor, Client Inventory and Reports are common tabs.
-     - Library tabs appear ONLY for the explicit Librarian startup role.
-     - Equipment follows the original non-Library / non-Security access rule.
-     - Visitors stays hidden by default and is revealed only by showVisitorTab()
-       while an active visitor workflow is in progress. */
   if(!window.currentSession || !currentSession.facility){ filterReportOptions(); return; }
-  var isLibrarianRole = currentSession.role === 'librarian';
+  var role=String(currentSession.role||'').toLowerCase();
+  var isAdmin=role==='central_admin', isPersonnel=role==='personnel', isLibrarianRole=role==='librarian';
   var set=function(id,on){var e=document.getElementById(id);if(e)e.style.display=on?'inline-block':'none';};
 
-  set('bookInvBtn',isLibrarianRole);
-  set('borrowBtn',isLibrarianRole);
-  set('reservationTabBtn',isLibrarianRole);
-  var guardRole=(typeof window.isGuardWatchmanSession==='function')?!!window.isGuardWatchmanSession():String(currentSession.role||currentSession.designation||'').toLowerCase().indexOf('guard')>=0;
-  var settingsNav=document.getElementById('qlogSettingsNav');if(settingsNav)settingsNav.style.display=guardRole?'none':'inline-block';
-
-  if(typeof window.applyEquipmentTabVisibility==='function'){
-    window.applyEquipmentTabVisibility();
+  if(isPersonnel){
+    ['liveTabBtn','clientInventoryTabBtn','visitorTabBtn','bookInvBtn','borrowBtn','reservationTabBtn','equipBtn','reportsTabBtn','qlogSettingsNav'].forEach(function(id){set(id,false);});
+    set('certificatesTabBtn',true);set('eipcrfTabBtn',true);
   }else{
-    var equipmentAllowed = (typeof window.canAccessEquipmentModule==='function') ? !!window.canAccessEquipmentModule() : false;
-    set('equipBtn',equipmentAllowed);
+    set('bookInvBtn',isLibrarianRole||isAdmin);
+    set('borrowBtn',isLibrarianRole||isAdmin);
+    set('reservationTabBtn',isLibrarianRole||isAdmin);
+    if(isAdmin){set('liveTabBtn',true);set('clientInventoryTabBtn',true);set('visitorTabBtn',true);set('reportsTabBtn',true);set('certificatesTabBtn',true);set('eipcrfTabBtn',true);set('equipBtn',true);set('qlogSettingsNav',true);}
+    else{
+      var guardRole=(typeof window.isGuardWatchmanSession==='function')?!!window.isGuardWatchmanSession():role.indexOf('guard')>=0;
+      var settingsNav=document.getElementById('qlogSettingsNav');if(settingsNav)settingsNav.style.display=guardRole?'none':'inline-block';
+      if(typeof window.applyEquipmentTabVisibility==='function')window.applyEquipmentTabVisibility();
+      else set('equipBtn',(typeof window.canAccessEquipmentModule==='function')?!!window.canAccessEquipmentModule():false);
+      var visitorBtn=document.getElementById('visitorTabBtn'),visitorTab=document.getElementById('visitors');
+      if(visitorBtn&&(!visitorTab||!visitorTab.classList.contains('active')))visitorBtn.style.display='none';
+    }
   }
-
-  /* IMPORTANT: do not force visitorTabBtn visible here. The original flow
-     controls it through showVisitorTab()/hideVisitorTab(). */
-  var visitorBtn=document.getElementById('visitorTabBtn');
-  var visitorTab=document.getElementById('visitors');
-  if(visitorBtn && (!visitorTab || !visitorTab.classList.contains('active'))){
-    visitorBtn.style.display='none';
-  }
-
+  if(typeof window.applyProfessionalAdminVisibility==='function')window.applyProfessionalAdminVisibility();
   filterReportOptions();
   var a=document.querySelector('.tab.active');
-  if(a){
-    var badLibrary=!isLibrarianRole && ['bookinv','borrow','reservationsTab'].indexOf(a.id)>=0;
-    var badEquipment=a.id==='equipment' && typeof window.canAccessEquipmentModule==='function' && !window.canAccessEquipmentModule();
-    var badSettings=guardRole&&a.id==='settings';
-    if((badLibrary||badEquipment||badSettings)&&window.showTab){var b=document.querySelector('.nav button');showTab('live',b);}
+  if(a&&window.showTab){
+    if(isPersonnel&&['certificates','eipcrf'].indexOf(a.id)<0){var cb=document.getElementById('certificatesTabBtn');if(cb)showTab('certificates',cb);return;}
+    var badLibrary=!isAdmin&&!isLibrarianRole&&['bookinv','borrow','reservationsTab'].indexOf(a.id)>=0;
+    var badEquipment=!isAdmin&&a.id==='equipment'&&typeof window.canAccessEquipmentModule==='function'&&!window.canAccessEquipmentModule();
+    var badSettings=!isAdmin&&typeof window.isGuardWatchmanSession==='function'&&window.isGuardWatchmanSession()&&a.id==='settings';
+    if(badLibrary||badEquipment||badSettings){var b=document.getElementById('liveTabBtn')||document.querySelector('.nav button');showTab('live',b);}
   }
 }
 function filterReportOptions(){
@@ -199,10 +192,11 @@ function submitOperationalResetAuth(){
 function patchLifecycle(){
   if(window.finalizeStartup&&!window.finalizeStartup.__qclassic){var oldF=window.finalizeStartup;var f=function(){var r=oldF.apply(this,arguments);setTimeout(function(){applyVisibility();applyBranding();renderScope();},20);return r;};f.__qclassic=true;window.finalizeStartup=f;}
   if(window.showTab&&!window.showTab.__qclassic){var oldS=window.showTab;var s=function(id,btn){
-    var isLibrarianRole=!!(window.currentSession&&currentSession.role==='librarian');
-    if(['bookinv','borrow','reservationsTab'].indexOf(id)>=0&&!isLibrarianRole){if(window.toast)toast('⛔ Library modules are available only to the Librarian role.','red');return;}
-    if(id==='equipment'&&typeof window.canAccessEquipmentModule==='function'&&!window.canAccessEquipmentModule()){if(window.toast)toast('⛔ Equipment Borrowing is not available for your unit.','red');return;}
-    if(id==='settings'&&typeof window.isGuardWatchmanSession==='function'&&window.isGuardWatchmanSession()){if(window.toast)toast('⛔ Settings is not available for the Guard role.','red');return;}
+    var role=String((window.currentSession&&currentSession.role)||'').toLowerCase(),isAdmin=role==='central_admin',isPersonnel=role==='personnel',isLibrarianRole=role==='librarian';
+    if(isPersonnel&&['certificates','eipcrf'].indexOf(id)<0){if(window.toast)toast('⛔ This account is limited to Teacher Certificates and eIPCRF uploads.','red');return;}
+    if(['bookinv','borrow','reservationsTab'].indexOf(id)>=0&&!isAdmin&&!isLibrarianRole){if(window.toast)toast('⛔ Library modules are available only to the Librarian role.','red');return;}
+    if(id==='equipment'&&!isAdmin&&typeof window.canAccessEquipmentModule==='function'&&!window.canAccessEquipmentModule()){if(window.toast)toast('⛔ Equipment Borrowing is not available for your unit.','red');return;}
+    if(id==='settings'&&!isAdmin&&typeof window.isGuardWatchmanSession==='function'&&window.isGuardWatchmanSession()){if(window.toast)toast('⛔ Settings is not available for the Guard role.','red');return;}
     var r=oldS.apply(this,arguments);if(id==='reports'){filterReportOptions();if(window.renderReports)renderReports();}if(id==='settings')renderScope();return r;};s.__qclassic=true;window.showTab=s;}
 }
 function boot(){ensureSettings();patchLifecycle();applyVisibility();applyBranding();renderScope();setTimeout(function(){applyVisibility();applyBranding();},300);}

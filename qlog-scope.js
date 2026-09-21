@@ -17,9 +17,11 @@ function currentKey(){ return unitKey(currentUnit()); }
 function isLibrary(){ return session().role === 'librarian'; }
 function isLibraryUnit(){ return /LIBRAR/.test(unitKey(currentUnit())); }
 function isSecurity(){ return /(SECURITY|GUARD|GATE)/.test(unitKey(currentUnit())); }
+function isCentralAdmin(){ return session().role === 'central_admin'; }
 function isSuperScope(){ return session().role === 'superadmin' || session().scope === 'ALL_UNITS'; }
 
 function capabilities(){
+  if(isCentralAdmin()) return {attendance:true,visitors:true,clients:true,library:true,equipment:true,reports:true,allUnits:false};
   if(isSuperScope()) return {attendance:true,visitors:true,clients:true,library:true,equipment:true,reports:true,allUnits:true};
   if(isLibrary()) return {attendance:true,visitors:true,clients:true,library:true,equipment:false,reports:true,allUnits:false};
   if(isSecurity()) return {attendance:true,visitors:true,clients:true,library:false,equipment:false,reports:true,allUnits:false};
@@ -90,7 +92,7 @@ function unitLabel(){return currentUnit() || 'Unassigned Facility';}
 
 global.QLogScope={
   version:'1.0.0', unitKey:unitKey, currentUnit:currentUnit, currentKey:currentKey,
-  unitLabel:unitLabel, isLibrary:isLibrary, isLibraryUnit:isLibraryUnit, isSecurity:isSecurity, isSuperScope:isSuperScope,
+  unitLabel:unitLabel, isLibrary:isLibrary, isLibraryUnit:isLibraryUnit, isSecurity:isSecurity, isCentralAdmin:isCentralAdmin, isSuperScope:isSuperScope,
   capabilities:capabilities, reportTypes:reportTypes, recordUnit:recordUnit,
   recordBelongs:recordBelongs, scopeReportRows:scopeReportRows, scopedRecords:scopedRecords,
   stampCurrent:stampCurrent, legacyCounts:legacyCounts, assignLegacyToCurrent:assignLegacyToCurrent
