@@ -78,6 +78,7 @@ async function process(index){
   try{for(var n=0;n<qty;n++)if(typeof global.triggerReservationFulfillment==='function')global.triggerReservationFulfillment(log.b);}catch(e){}
   localStorage.setItem('borrowLogs',JSON.stringify(logs));
   try{if(typeof global.logAudit==='function')global.logAudit('BOOK_RETURN','Returned '+qty+' copy/copies of '+log.b+' for '+log.l);}catch(e){}
+  try{if(global.QLogCentral&&typeof global.QLogCentral.syncDatasetsNow==='function')await global.QLogCentral.syncDatasetsNow(['borrowLogs','auditLogs','reservations']);}catch(syncErr){console.warn('[book-return-central-sync] Immediate sync deferred',syncErr);}
   try{if(typeof global.renderBorrow==='function')global.renderBorrow();if(typeof global.renderBookInventory==='function')global.renderBookInventory();if(typeof global.renderReservations==='function')global.renderReservations();}catch(e){}
   if(global.QLogClearance){
     var p=borrower(log.l);

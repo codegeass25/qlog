@@ -22,6 +22,7 @@
   var PENDING_PREFIX = 'qlogCentralPending::';
   var OFFLINE_QUEUE_PREFIX = 'qlogCentralOfflineQueue::';
   var VISITOR_FACE_CACHE_KEY = 'qlogCentralVisitorFaceDirectoryV1';
+  var BACKFILL_MARK_PREFIX = 'qlogCentralBackfillChecked::';
 
   var SYNC_KEYS = ['logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','configData','dynamicFilterData','borrowPolicies','clearances'];
   var SCHOOL_WIDE_DATASETS = ['logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','clearances'];
@@ -90,6 +91,106 @@
   function loadPending(scope){ try{var v=JSON.parse(localStorage.getItem(pendingKey(scope))||'[]');return new Set(Array.isArray(v)?v.filter(function(x){return SYNC_KEYS.indexOf(x)!==-1;}):[]);}catch(e){return new Set();} }
   function savePending(scope,p){ try{localStorage.setItem(pendingKey(scope),JSON.stringify(Array.from(p||[])));}catch(e){} }
   function clearPending(scope){ try{localStorage.removeItem(pendingKey(scope));}catch(e){} }
+
+  function semanticIdentity(dataset,o,index){
+    o=o||{};
+    if(dataset==='people'||dataset==='books'||dataset==='equipment')return String(o.id||o.isbn||o.ISBN||o.assetNo||o.asset||o.ID||dataset+':'+(index||0));
+    if(dataset==='logs')return [o.id||'',o.date||'',o.timein||o.timeIn||'',o.category||'',o.name||''].join('|');
+    if(dataset==='borrowLogs')return String(o.ref||[o.l||o.lId||'',o.b||o.isbn||o.bookId||'',o.borrowedAt||''].join('|'));
+    if(dataset==='reservations')return String(o.id||[o.isbn||o.b||'',o.lId||o.learnerId||'',o.createdAt||o.reservedAt||''].join('|'));
+    if(dataset==='auditLogs')return String(o.id||[o.timestamp||'',o.action||'',o.details||o.message||''].join('|'));
+    if(dataset==='equipLogs')return String(o.ref||[o.eqId||o.equipmentId||'',o.borrowerId||'',o.borrowedMs||o.borrowedAt||''].join('|'));
+    if(dataset==='clearances')return String(o.id||[o.module||'',o.borrowerId||'',o.issuedMs||o.issuedAt||''].join('|'));
+    return recordIdentity(dataset,o,index||0);
+  }
+  function lifecycleRank(v){
+    var s=String(v||'').toUpperCase();
+    if(s==='RETURNED'||s==='LOST'||s==='DAMAGED'||s==='MAINTENANCE'||s==='FULFILLED'||s==='COMPLETED'||s==='CANCELLED')return 3;
+    if(s==='OVERDUE')return 2;
+    if(s==='BORROWED'||s==='ACTIVE'||s==='QUEUED'||s==='PENDING')return 1;
+    return 0;
+  }
+  function localRecordIsNewer(dataset,local,remote){
+    local=local||{};remote=remote||{};
+    if(dataset==='logs')return !!(local.timeout||local.timeOut) && !(remote.timeout||remote.timeOut);
+    if(dataset==='borrowLogs'||dataset==='equipLogs'||dataset==='reservations'){
+      var lr=lifecycleRank(local.s||local.status), rr=lifecycleRank(remote.s||remote.status);
+      if(lr!==rr)return lr>rr;
+      if((local.returnedAt||local.returnDate||local.returnedMs) && !(remote.returnedAt||remote.returnDate||remote.returnedMs))return true;
+      if(Number(local.extensions||0)>Number(remote.extensions||0))return true;
+      return false;
+    }
+    // Audit and clearance records are immutable; inventory rows are only backfilled
+    // when missing so an old browser cannot overwrite a newer Central edit.
+    return false;
+  }
+  function readScopedLocalDataset(scope,dataset){
+    var raw=null;
+    try{
+      raw=localStorage.getItem(cacheKey(scope,dataset));
+      if(raw===null){
+        // Base localStorage belongs to the active/current profile only. Never import
+        // another user's last open browser state into this profile.
+        var active=String(localStorage.getItem('qlogCentralActiveScope')||'');
+        if(!active || active===scope)raw=localStorage.getItem(dataset);
+      }
+      if(raw===null)return [];
+      var value=JSON.parse(raw);
+      if(!Array.isArray(value))return [];
+      return value;
+    }catch(e){return [];}
+  }
+  function backfillMarkKey(scope){return BACKFILL_MARK_PREFIX+hashScope(scope);}
+  async function backfillLocalOperationalData(){
+    var scope=currentScope();
+    if(!scope||!state.token||!navigator.onLine)return false;
+    var allowed=allowedDatasetsForCurrentRole();
+    var candidates={};
+    var hasAny=false;
+    var server=await api('/api/state');
+    if(applyCentralResetGeneration(server.centralResetGeneration))return false;
+    var central=(server&&server.datasets)||{};
+    PROFILE_DATASETS.forEach(function(dataset){
+      if(dataset==='people'||!allowed.has(dataset))return;
+      var localRows=readScopedLocalDataset(scope,dataset);
+      if(!localRows.length)return;
+      var remoteRows=Array.isArray(central[dataset])?central[dataset]:[];
+      var remoteBySemantic={},remoteBySync={};
+      remoteRows.forEach(function(r,i){
+        var sid=String((r&&r._syncId)||'');
+        if(sid)remoteBySync[sid]=r;
+        remoteBySemantic[semanticIdentity(dataset,r,i)]=r;
+      });
+      var upload=[];
+      localRows.forEach(function(l,i){
+        if(!l||typeof l!=='object')return;
+        var sid=String(l._syncId||'');
+        var sem=semanticIdentity(dataset,l,i);
+        var remote=(sid&&remoteBySync[sid])||remoteBySemantic[sem]||null;
+        if(!remote || localRecordIsNewer(dataset,l,remote)){
+          var row=JSON.parse(JSON.stringify(l));
+          if(remote&&remote._syncId&&!row._syncId)row._syncId=remote._syncId;
+          if(!row._syncId && ['logs','borrowLogs','reservations','auditLogs','equipLogs','clearances'].indexOf(dataset)!==-1)row._syncId=stableId();
+          upload.push(row);
+        }
+      });
+      if(upload.length){candidates[dataset]=upload;hasAny=true;}
+    });
+    if(!hasAny){
+      try{localStorage.setItem(backfillMarkKey(scope),new Date().toISOString());}catch(e){}
+      return true;
+    }
+    await api('/api/sync',{method:'POST',body:JSON.stringify({
+      version:'5.0.1-backfill',
+      client:'QLog Pro Ultimate',
+      datasets:candidates,
+      deletions:{},
+      device:{facility:currentFacility(),inCharge:currentInCharge(),designation:currentDesignation(),role:currentRole()}
+    })});
+    try{localStorage.setItem(backfillMarkKey(scope),new Date().toISOString());}catch(e){}
+    setStatus('Recovered '+Object.keys(candidates).length+' local operational dataset(s) to Central','ok',{force:true});
+    return true;
+  }
 
   function offlineQueueKey(scope){return OFFLINE_QUEUE_PREFIX+hashScope(scope);}
   function loadOfflineQueue(scope){try{var q=JSON.parse(localStorage.getItem(offlineQueueKey(scope))||'[]');return Array.isArray(q)?q:[];}catch(e){return [];}}
@@ -727,17 +828,20 @@
         PROFILE_DATASETS.forEach(function(name){setDatasetLocal(name,[],false);});
         clearLocalResetHold(currentScope());
         await activateSync('existing');
+        await backfillLocalOperationalData();
         await fullProfileReconcile();
         saveProfileCache(currentScope());
         setStatus('Connected to Central. Authorized profile data restored automatically after device reset.','ok');
       }else if(resetRequested || !cached){
         await activateSync('existing');
+        await backfillLocalOperationalData();
         await fullProfileReconcile();
         saveProfileCache(currentScope());
         localStorage.removeItem(RESET_KEY);
       }else{
         loadProfileCache(currentScope());
         await activateSync('existing');
+        await backfillLocalOperationalData();
         await fullProfileReconcile();
       }
       closeAuth(); connectSocket();
@@ -778,8 +882,10 @@
         if(cached) loadProfileCache(scope); else PROFILE_DATASETS.forEach(function(n){setDatasetLocal(n,[],false);});
         refreshUi();
         await activateSync('existing');
-        // Central is authoritative on profile entry. Pull first; queued offline
-        // work is replayed locally and waits for explicit review/sync.
+        // Recover any profile-scoped transactions cached on this browser BEFORE the
+        // authoritative pull. Missing records are merged; existing Central records
+        // are never blindly replaced by an older browser copy.
+        await backfillLocalOperationalData();
         await fullProfileReconcile();
         if(!hasOfflineQueue(scope)) clearPending(scope);
         connectSocket();
@@ -794,6 +900,7 @@
       state.pending=loadPending(scope);
       if(state.token){
         if(hasProfileCache(scope))loadProfileCache(scope);
+        await backfillLocalOperationalData();
         await fullProfileReconcile();saveProfileCache(scope);
         connectSocket();
       }
@@ -864,6 +971,12 @@
       if(tracked){try{before=JSON.parse(ls.getItem(k)||'null');}catch(e){}}
       if(tracked){try{after=JSON.parse(v);if(Array.isArray(after)){ensureStableIds(k,after);if(k==='logs')after=dedupeOperationalLogs(after);v=JSON.stringify(after);syncWindowArray(k,after);}}catch(e){after=null;}}
       os(k,v);
+      if(tracked && PROFILE_DATASETS.indexOf(k)!==-1 && currentScope()){
+        // Persist every transaction immediately to the authenticated profile cache.
+        // This prevents browser/profile switches or an authoritative Central pull
+        // from erasing a locally completed borrow/return/audit/clearance event.
+        try{os(cacheKey(currentScope(),k),v);}catch(e){}
+      }
       if(tracked){
         if(after===null){try{after=JSON.parse(v);}catch(e){}}
         if(!navigator.onLine){queueOfflineDifference(k,before,after);showOfflineReview();return;}
@@ -961,6 +1074,17 @@
     var resetRequested=!!localStorage.getItem(RESET_KEY);
     var held=localResetHeld(scope);
     var cached=hasProfileCache(scope);
+    // Upgrade recovery: older builds could have valid profile transactions only in
+    // the live localStorage keys, with no qlogProfileCache copy yet. Capture that
+    // state BEFORE any authoritative startup clear/pull so Borrow Logs, Audit and
+    // Clearances can be backfilled to Central instead of being silently erased.
+    var rememberedScope=String(localStorage.getItem('qlogCentralActiveScope')||'');
+    if(!held && !resetRequested && !cached && (!rememberedScope || rememberedScope===scope)){
+      PROFILE_DATASETS.forEach(function(n){
+        try{var raw=localStorage.getItem(n);if(raw!==null)localStorage.setItem(cacheKey(scope,n),raw);}catch(e){}
+      });
+      cached=hasProfileCache(scope);
+    }
     if(held){
       PROFILE_DATASETS.forEach(function(n){setDatasetLocal(n,[],false);});
     }else if(cached && !resetRequested) loadProfileCache(scope);
@@ -976,10 +1100,11 @@
       setStatus('Central '+scopeLabel()+' connection ready','warn');
       if(held){
         clearLocalResetHold(scope);
+        await backfillLocalOperationalData();
         await fullProfileReconcile(); saveProfileCache(scope);
         setStatus('Central '+scopeLabel()+' restored automatically after device reset','ok');
-      }else if(resetRequested || !cached){ await fullProfileReconcile(); saveProfileCache(scope); localStorage.removeItem(RESET_KEY); }
-      else { await fullProfileReconcile(); }
+      }else if(resetRequested || !cached){ await backfillLocalOperationalData(); await fullProfileReconcile(); saveProfileCache(scope); localStorage.removeItem(RESET_KEY); }
+      else { await backfillLocalOperationalData(); await fullProfileReconcile(); }
       connectSocket();
       try{ window.dispatchEvent(new Event('qlog:central-ready')); }catch(e){}
     }else{
@@ -1076,6 +1201,7 @@
     sync:function(){schedule(SYNC_KEYS);sync(true);if(hasOfflineQueue(currentScope()))showOfflineReview();},
     syncDatasets:function(names){schedule(names||SYNC_KEYS);sync(false);if(hasOfflineQueue(currentScope()))showOfflineReview();},
     syncDatasetsNow:syncDatasetsNow,
+    backfillLocalOperationalData:backfillLocalOperationalData,
     resetDevice:resetThisDevice,
     rebuildMyOffice:rebuildMyOffice,
     getDeleteQueue:function(){return readDeleteQueue(currentScope());},

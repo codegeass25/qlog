@@ -1370,7 +1370,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
     </div>
     <div class="full-table">
         <table class="wide-ics-table">
-            <thead><tr><th>Inventory Item No.</th><th>ISBN</th><th>Title</th><th>Author / Publisher</th><th>Subject</th><th>Year Level</th><th>COA Account</th><th>Qty</th><th>Unit Cost</th><th>Total Cost</th><th>Useful Life</th><th>ICS No.</th><th>Fund Cluster</th><th>Date Acquired</th><th>Borrowed</th><th>Lost</th><th>Damaged</th><th>Remaining</th><th>Status</th><th>Action</th></tr></thead>
+            <thead><tr><th>Inventory Item No.</th><th>ISBN</th><th>Title</th><th>Author / Publisher</th><th>Subject</th><th>Year Level</th><th>COA Account</th><th>Registered Qty</th><th>Unit Cost</th><th>Total Cost</th><th>Useful Life</th><th>ICS No.</th><th>Fund Cluster</th><th>Date Acquired</th><th>Borrowed</th><th>Lost</th><th>Damaged</th><th>Qty / Available</th><th>Status</th><th>Action</th></tr></thead>
             <tbody id="bookInventoryTbl"></tbody>
         </table>
     </div>
@@ -1975,6 +1975,7 @@ function addSignatureToExcel(ws) {
 function logAudit(action, details) {
     var librarianName = currentSession.inCharge || 'System';
     auditLogs.push({
+        _syncId: (window.QLogCentral && QLogCentral.newSyncId) ? QLogCentral.newSyncId() : ('SYNC-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2)),
         timestamp: new Date().toLocaleString(),
         librarian: librarianName,
         action: action,
@@ -6305,6 +6306,9 @@ function commitStagedTransaction() {
         });
     }
     logAudit("BULK_TRANSACTION", "Processed " + operationsSucceeded + " operations from Staging Cart.");
+    if(window.QLogCentral && typeof QLogCentral.syncDatasetsNow === 'function') {
+        QLogCentral.syncDatasetsNow(['borrowLogs','reservations','auditLogs']).catch(function(e){ console.warn('[library-central-sync] Immediate transaction sync deferred',e); });
+    }
     
     stagedSessionCart = []; renderStagedCart(); renderBorrow(); renderBookInventory();
     
@@ -6382,6 +6386,7 @@ function processRenewExtensionLog(logIndex) {
 
     localStorage.setItem('borrowLogs', JSON.stringify(borrowLogs));
     logAudit("RENEWAL", "Extended due date for user " + log.l + " on book " + log.b);
+    if(window.QLogCentral && typeof QLogCentral.syncDatasetsNow === 'function') QLogCentral.syncDatasetsNow(['borrowLogs','auditLogs']).catch(function(e){console.warn('[library-central-sync] Renewal sync deferred',e);});
     renderBorrow(); toast("📅 Due date successfully extended by " + RENEWAL_DAYS_COUNT + " days!", "green");
 }
 
@@ -6411,6 +6416,7 @@ function reportDamageLost(logIndex) {
 
     logAudit("CONDITION_AUDIT", "Marked " + reportQty + " copy(s) of " + log.b + " as " + statusChoice + " for user " + log.l);
     localStorage.setItem('borrowLogs', JSON.stringify(borrowLogs));
+    if(window.QLogCentral && typeof QLogCentral.syncDatasetsNow === 'function') QLogCentral.syncDatasetsNow(['borrowLogs','auditLogs']).catch(function(e){console.warn('[library-central-sync] Condition sync deferred',e);});
     renderBorrow(); renderBookInventory();
 }
 

@@ -94,13 +94,36 @@ function printHtml(rec){
   var frame=document.createElement('iframe');frame.style.position='fixed';frame.style.right='0';frame.style.bottom='0';frame.style.width='1px';frame.style.height='1px';frame.style.border='0';frame.style.opacity='0.01';document.body.appendChild(frame);var d=frame.contentDocument||frame.contentWindow.document;d.open();d.write(html);d.close();setTimeout(function(){try{frame.contentWindow.focus();frame.contentWindow.print();}catch(e){}setTimeout(function(){frame.remove();},1500);},250);
 }
 
+function clearanceMeta(rec){
+  rec=rec||{};
+  var meta={id:rec.id,module:rec.module,borrowerId:rec.borrowerId,borrowerName:rec.borrowerName,borrowerCategory:rec.borrowerCategory,facilityName:rec.facilityName,facilityId:rec.facilityId,items:(rec.items||[]).map(function(x){return {name:x.name||x.title||'',title:x.title||'',id:x.id||'',isbn:x.isbn||'',qty:x.qty||1,returnedAt:x.returnedAt||'',condition:x.condition||'',ref:x.ref||''};}),issuedMs:rec.issuedMs,issuedAt:rec.issuedAt,receivedBy:rec.receivedBy,receivedByDesignation:rec.receivedByDesignation,remaining:rec.remaining,accountabilityStatus:rec.accountabilityStatus,filename:rec.filename||''};if(rec._syncId)meta._syncId=rec._syncId;return meta;
+}
 function syncMetaMirror(rec){
   try{
     var arr=JSON.parse(global.localStorage.getItem('clearances')||'[]');if(!Array.isArray(arr))arr=[];
-    var meta={id:rec.id,module:rec.module,borrowerId:rec.borrowerId,borrowerName:rec.borrowerName,borrowerCategory:rec.borrowerCategory,facilityName:rec.facilityName,facilityId:rec.facilityId,items:(rec.items||[]).map(function(x){return {name:x.name||x.title||'',title:x.title||'',id:x.id||'',isbn:x.isbn||'',qty:x.qty||1,returnedAt:x.returnedAt||'',condition:x.condition||'',ref:x.ref||''};}),issuedMs:rec.issuedMs,issuedAt:rec.issuedAt,receivedBy:rec.receivedBy,receivedByDesignation:rec.receivedByDesignation,remaining:rec.remaining,accountabilityStatus:rec.accountabilityStatus,filename:rec.filename||''};
+    var meta=clearanceMeta(rec);
     var i=arr.findIndex(function(x){return x&&x.id===meta.id;});if(i>=0)arr[i]=meta;else arr.push(meta);
     global.localStorage.setItem('clearances',JSON.stringify(arr));
   }catch(e){console.warn('[QLog Clearance] Central metadata mirror failed',e);}
+}
+async function recoverArchivedClearancesToMirror(){
+  try{
+    var role=String((global.currentSession||{}).role||'').toLowerCase();
+    if(/guard|security|watchman/.test(role))return 0;
+    var archived=(await all()).filter(function(r){return recordVisible(r,'');});
+    if(!archived.length)return 0;
+    var arr=JSON.parse(global.localStorage.getItem('clearances')||'[]');if(!Array.isArray(arr))arr=[];
+    var byId={};arr.forEach(function(x,i){if(x&&x.id)byId[String(x.id)]=i;});
+    var added=0;
+    archived.forEach(function(rec){
+      var meta=clearanceMeta(rec),key=String(meta.id||'');if(!key)return;
+      if(Object.prototype.hasOwnProperty.call(byId,key))arr[byId[key]]=Object.assign({},arr[byId[key]],meta);
+      else{byId[key]=arr.length;arr.push(meta);added++;}
+    });
+    global.localStorage.setItem('clearances',JSON.stringify(arr));
+    if(global.QLogCentral&&typeof global.QLogCentral.syncDatasetsNow==='function')await global.QLogCentral.syncDatasetsNow(['clearances']);
+    return added;
+  }catch(e){console.warn('[QLog Clearance] Archive-to-Central recovery deferred',e);return 0;}
 }
 
 function buildRecord(opts){
@@ -117,7 +140,7 @@ async function issue(opts){
   // zero active equipment. Accountability in the other module does not block it.
   if(module==='LIBRARY' && remaining.books>0) return {issued:false,reason:'OUTSTANDING_BOOKS',remaining:remaining};
   if(module==='EQUIPMENT' && remaining.equipment>0) return {issued:false,reason:'OUTSTANDING_EQUIPMENT',remaining:remaining};
-  var rec=buildRecord(opts);var blob=await generateDocx(rec);rec.filename='QLog_Clearance_'+safeName(rec.borrowerName)+'_'+rec.id+'.docx';rec.docxBlob=blob;await put(rec);syncMetaMirror(rec);
+  var rec=buildRecord(opts);var blob=await generateDocx(rec);rec.filename='QLog_Clearance_'+safeName(rec.borrowerName)+'_'+rec.id+'.docx';rec.docxBlob=blob;await put(rec);syncMetaMirror(rec);try{if(global.QLogCentral&&typeof global.QLogCentral.syncDatasetsNow==='function')await global.QLogCentral.syncDatasetsNow(['clearances']);}catch(syncErr){console.warn('[QLog Clearance] Immediate Central sync deferred',syncErr);}
   if(global.toast) global.toast('📁 Clearance archived: '+rec.id,'green');
   if(opts.autoPrint!==false){try{printHtml(rec);}catch(e){if(global.toast)global.toast('Clearance saved to archive. Printing could not be opened automatically.','yellow');}}
   return {issued:true,record:rec};
@@ -134,5 +157,7 @@ async function archiveHtml(scope){var rows=(await all()).filter(function(r){retu
 async function openArchive(scope){
   var ov=document.getElementById('qlogClearanceArchiveModal');if(!ov){ov=document.createElement('div');ov.id='qlogClearanceArchiveModal';ov.className='modal-overlay';ov.innerHTML='<div class="modal-content" style="max-width:1180px;"><div class="modal-header"><div><h3 style="margin:0;">📁 Clearance Archive</h3><div style="font-size:12px;color:#64748b;margin-top:3px;">Archived DOCX clearances remain available offline for future download or printing.</div></div><button class="modal-close" onclick="document.getElementById(\'qlogClearanceArchiveModal\').style.display=\'none\'">Close</button></div><div class="full-table"><table><thead><tr><th>Clearance No.</th><th>Borrower / Client</th><th>ID</th><th>Module</th><th>Facility</th><th>Returned Item(s)</th><th>Issued</th><th>Actions</th></tr></thead><tbody id="qlogClearanceArchiveTbl"></tbody></table></div></div>';document.body.appendChild(ov);}ov.style.display='flex';var tb=document.getElementById('qlogClearanceArchiveTbl');tb.innerHTML='<tr><td colspan="8">Loading clearance archive...</td></tr>';try{tb.innerHTML=await archiveHtml(scope||'');}catch(e){tb.innerHTML='<tr><td colspan="8" style="color:#dc2626;">Unable to load archive: '+escHtml(e.message||e)+'</td></tr>';}}
 
-global.QLogClearance={version:'1.0.0',isTeacherCategory:isTeacherCategory,outstandingFor:outstandingFor,generateDocx:generateDocx,issue:issue,list:all,get:get,download:download,print:printOne,openArchive:openArchive,clearAll:clearAll,_makeDocXml:makeDocXml,_buildRecord:buildRecord};
+global.QLogClearance={version:'1.0.1',isTeacherCategory:isTeacherCategory,outstandingFor:outstandingFor,generateDocx:generateDocx,issue:issue,list:all,get:get,download:download,print:printOne,openArchive:openArchive,clearAll:clearAll,recoverArchivedClearancesToMirror:recoverArchivedClearancesToMirror,_makeDocXml:makeDocXml,_buildRecord:buildRecord};
+global.addEventListener('qlog:central-ready',function(){setTimeout(function(){recoverArchivedClearancesToMirror();},120);});
+global.addEventListener('qlog:central-profile-switched',function(){setTimeout(function(){recoverArchivedClearancesToMirror();},120);});
 })(window);
