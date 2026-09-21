@@ -7870,5 +7870,102 @@ window.addEventListener('qlog:central-ready',function(){
     try{renderPeople();renderLogs();renderReservations();if(typeof renderBookInventory==='function')renderBookInventory();if(typeof renderBorrow==='function')renderBorrow();if(typeof refreshEquipmentUI==='function')refreshEquipmentUI();}catch(e){}
 });
 </script>
+
+<script id="qlog-focused-equipment-librarian-hotfix">
+/* Focused hotfix: Equipment Registry open action + Librarian Save & Continue only. */
+(function(){
+  window.openEquipRegistryModal = function(){
+    try{
+      if(typeof window.isLibraryPersonnel==='function' && window.isLibraryPersonnel()){
+        if(typeof window.toast==='function') window.toast('⛔ Equipment Registry is not available for the Librarian role.','red');
+        return;
+      }
+      if(typeof window.isSecurityPersonnel==='function' && window.isSecurityPersonnel()){
+        if(typeof window.toast==='function') window.toast('⛔ Equipment Registry is not available for the Guard/Security role.','red');
+        return;
+      }
+      var modal=document.getElementById('equipRegistryModal');
+      if(!modal){
+        if(typeof window.toast==='function') window.toast('❌ Equipment Registry window is unavailable.','red');
+        return;
+      }
+      modal.style.display='flex';
+      try{
+        if(typeof window.populateDatalist==='function'){
+          var facilities=(window.configData&&Array.isArray(window.configData.facilities))?window.configData.facilities:[];
+          window.populateDatalist('eqUnitList',facilities);
+          if(typeof window.ICS_MEASURE_UNITS!=='undefined') window.populateDatalist('eqMeasureUnitList',window.ICS_MEASURE_UNITS);
+        }
+        var unitField=document.getElementById('eqNewUnit');
+        var session=window.currentSession||{};
+        var currentUnit=session.facility||session.facilityName||session.office||session.unit||'';
+        if(unitField && !unitField.value && currentUnit) unitField.value=currentUnit;
+        if(typeof window.updateEquipCategorySuggestions==='function') window.updateEquipCategorySuggestions(true);
+        if(typeof window.renderEquipRegistry==='function') window.renderEquipRegistry();
+      }catch(setupErr){
+        console.error('[QLog] Equipment Registry setup warning:',setupErr);
+      }
+    }catch(err){
+      console.error('[QLog] Equipment Registry open failed:',err);
+      if(typeof window.toast==='function') window.toast('❌ Could not open Equipment Registry.','red');
+    }
+  };
+
+  window.saveLibrarianConfigAndContinue = function(){
+    try{
+      var nameEl=document.getElementById('cbLibName');
+      var desigEl=document.getElementById('cbLibDesignation');
+      var person=nameEl?String(nameEl.value||'').trim():'';
+      var desig=desigEl?String(desigEl.value||'').trim():'';
+      if(!person || !desig){
+        alert('Please fill in all fields to continue.');
+        return;
+      }
+
+      if(!window.configData || typeof window.configData!=='object') window.configData={facilities:[],personnel:[],designations:[]};
+      if(!Array.isArray(window.configData.facilities)) window.configData.facilities=[];
+      if(!Array.isArray(window.configData.personnel)) window.configData.personnel=[];
+      if(!Array.isArray(window.configData.designations)) window.configData.designations=[];
+      if(window.configData.facilities.indexOf('School Library')===-1) window.configData.facilities.push('School Library');
+      if(window.configData.personnel.indexOf(person)===-1) window.configData.personnel.push(person);
+      if(window.configData.designations.indexOf(desig)===-1) window.configData.designations.push(desig);
+      localStorage.setItem('configData',JSON.stringify(window.configData));
+
+      window.currentSession={facility:'School Library',facilityName:'School Library',unit:'School Library',inCharge:person,designation:desig,role:'librarian'};
+      localStorage.setItem('savedSession',JSON.stringify(window.currentSession));
+
+      var overlay=document.getElementById('startupOverlay');
+      if(overlay) overlay.style.display='none';
+
+      var finalized=false;
+      try{
+        if(typeof window.finalizeStartup==='function'){
+          window.finalizeStartup(true);
+          finalized=true;
+        }
+      }catch(finalizeErr){
+        console.error('[QLog] Librarian startup finalizer warning:',finalizeErr);
+      }
+
+      if(!finalized){
+        var facilityTitle=document.getElementById('facilityTitle'); if(facilityTitle) facilityTitle.textContent='SCHOOL LIBRARY';
+        var logoutBtn=document.getElementById('logoutBtn'); if(logoutBtn) logoutBtn.style.display='flex';
+        var changePwdBtn=document.getElementById('changePwdBtn'); if(changePwdBtn) changePwdBtn.style.display='flex';
+        ['bookInvBtn','borrowBtn','reservationTabBtn'].forEach(function(id){var el=document.getElementById(id);if(el)el.style.display='inline-block';});
+      }
+      try{ if(typeof window.applyEquipmentTabVisibility==='function') window.applyEquipmentTabVisibility(); }catch(e){}
+      try{ if(typeof window.renderBookInventory==='function') window.renderBookInventory(); }catch(e){}
+      try{ if(typeof window.renderBorrow==='function') window.renderBorrow(); }catch(e){}
+      try{ if(typeof window.renderReservations==='function') window.renderReservations(); }catch(e){}
+      if(typeof window.toast==='function') window.toast('✅ Librarian configuration saved.','green');
+    }catch(err){
+      console.error('[QLog] Librarian configuration failed:',err);
+      if(typeof window.toast==='function') window.toast('❌ Could not save Librarian configuration.','red');
+      else alert('Could not save Librarian configuration.');
+    }
+  };
+})();
+</script>
+
 </body>
 </html>
