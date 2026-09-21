@@ -1418,7 +1418,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
                 <select id="borrowCameraSelect" style="display:none; max-width:200px;" onchange="switchBorrowCameraDevice()"></select>
             </div>
         </div>
-        <div id="borrowCameraArea" style="display: none; margin-top: 15px; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 15px;">
+        <div id="borrowCameraArea" style="display: block; margin-top: 15px; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 15px;">
             <p style="font-size:14px; color:#64748b; margin-top:0;">Position QR Code inside the green frame</p>
             <div class="video-wrapper">
                 <video id="borrowLiveCamera" autoplay playsinline style="transform: scaleX(-1);"></video>
@@ -3399,7 +3399,7 @@ function showTab(id, btn){
     else if (id === 'borrow') {
         stopEquipCameraScanner();
         if (currentBorrowScanMode === 'CAMERA') {
-            stopCameraScanner(); initBorrowCameraScanner();
+            stopCameraScanner(); setBorrowScanMode('CAMERA');
         } else if (currentBorrowScanMode === 'USB') {
             stopCameraScanner();
             var hiddenSc = document.getElementById('borrowHiddenScanner');
@@ -5973,7 +5973,36 @@ function editBook(id){
     var card=document.getElementById('newBookId');if(card&&card.scrollIntoView)card.scrollIntoView({behavior:'smooth',block:'center'});
     toast('✏️ Loaded '+(b.title||b.isbn)+' for ICS completion/edit.','yellow');
 }
-function addBook(){
+function _libStampCentralOwner(book){
+    if(!book || typeof book!=='object') return book;
+    var sess=window.currentSession||{};
+    book.qlogOwnerUsername=String(sess.inCharge||'').trim();
+    book.qlogOwnerRole=String(sess.role||'librarian').trim().toLowerCase();
+    book.qlogOwnerFacility=String(sess.facility||sess.facilityName||LIB_ASSIGNED_UNIT||'School Library').trim();
+    return book;
+}
+async function _libCommitBooksToCentral(label){
+    label=label||'Library inventory';
+    if(!navigator.onLine){
+        toast('⚠️ '+label+' saved offline. Review and sync it when Central is online.','yellow');
+        return false;
+    }
+    if(!window.QLogCentral || typeof window.QLogCentral.syncDatasetsNow!=='function'){
+        toast('⚠️ '+label+' is saved locally, but Central sync is not ready yet.','yellow');
+        return false;
+    }
+    try{
+        var ok=await window.QLogCentral.syncDatasetsNow(['books']);
+        if(ok){ toast('✅ '+label+' saved to Central.','green'); return true; }
+        toast('⚠️ '+label+' is saved locally but Central sync is pending. Keep this device online until it syncs.','yellow');
+        return false;
+    }catch(e){
+        console.error('[library-central-sync]',e);
+        toast('⚠️ '+label+' is saved locally but could not reach Central yet.','yellow');
+        return false;
+    }
+}
+async function addBook(){
     _libPopulateSelectors();
     var rec={
         id:(document.getElementById('newBookId')||{}).value||'', isbn:(document.getElementById('newISBN')||{}).value||'', title:(document.getElementById('newTitle')||{}).value||'', author:(document.getElementById('newAuthor')||{}).value||'',
@@ -5989,12 +6018,14 @@ function addBook(){
         var counts=_libCounts(ex.isbn); if(rec.copies<counts.out){toast('❌ Quantity cannot be below '+counts.out+' copies already borrowed/lost/damaged.','red');return;}
         if(String(ex.isbn)!==String(rec.isbn)&&borrowLogs.some(function(x){return String(x.b)===String(ex.isbn);})){toast('❌ ISBN cannot be changed because transaction history already exists for this book.','red');return;}
         Object.assign(ex,rec,{category:rec.subject,measureUnit:'copy',totalCost:Math.round(rec.copies*rec.unitCost*100)/100,coaAccountCode:LIB_COA_ACCOUNT_CODE,coaCategory:LIB_COA_CATEGORY,assignedUnit:LIB_ASSIGNED_UNIT,icsAligned:true,updatedAt:Date.now(),updatedBy:currentSession.inCharge||''});
-        logAudit('UPDATE_BOOK_ICS','Updated ICS library record '+ex.id+' / '+ex.isbn); toast('✅ ICS book record updated.','green');
+        _libStampCentralOwner(ex);
+        logAudit('UPDATE_BOOK_ICS','Updated ICS library record '+ex.id+' / '+ex.isbn);
     }else{
-        books.push(Object.assign({},rec,{category:rec.subject,measureUnit:'copy',totalCost:Math.round(rec.copies*rec.unitCost*100)/100,coaAccountCode:LIB_COA_ACCOUNT_CODE,coaCategory:LIB_COA_CATEGORY,assignedUnit:LIB_ASSIGNED_UNIT,icsAligned:true,addedAt:Date.now(),addedBy:currentSession.inCharge||''}));
-        logAudit('ADD_BOOK_ICS','Added ICS library record '+rec.id+' / '+rec.isbn+' (Qty: '+rec.copies+')'); toast('✅ ICS book record saved.','green');
+        books.push(_libStampCentralOwner(Object.assign({},rec,{category:rec.subject,measureUnit:'copy',totalCost:Math.round(rec.copies*rec.unitCost*100)/100,coaAccountCode:LIB_COA_ACCOUNT_CODE,coaCategory:LIB_COA_CATEGORY,assignedUnit:LIB_ASSIGNED_UNIT,icsAligned:true,addedAt:Date.now(),addedBy:currentSession.inCharge||''})));
+        logAudit('ADD_BOOK_ICS','Added ICS library record '+rec.id+' / '+rec.isbn+' (Qty: '+rec.copies+')');
     }
     localStorage.setItem('books',JSON.stringify(books)); _libResetForm(); renderBookInventory();
+    await _libCommitBooksToCentral(ex?'ICS book record update':'ICS book record');
 }
 function renderBookInventory(){
     _libMigrateBooks(); _libPopulateSelectors();
@@ -6011,7 +6042,7 @@ function importBooks(){
     if(!fileInput||!fileInput.files||!fileInput.files.length){toast('Choose an Excel file first.','yellow');return;}
     if(typeof XLSX==='undefined'){alert('Local Excel library not loaded.');return;}
     var f=fileInput.files[0],r=new FileReader();
-    r.onload=function(e){
+    r.onload=async function(e){
         var added=0,updated=0,legacy=0,invalid=0,problems=[];
         try{
             var wb=XLSX.read(new Uint8Array(e.target.result),{type:'array'});
@@ -6041,8 +6072,8 @@ function importBooks(){
                 var ex=books.find(function(b){return String(b.isbn).trim().toLowerCase()===isbn.toLowerCase()||String(b.id).trim().toLowerCase()===id.toLowerCase();});
                 if(!isIcs){
                     var addSubject=subject||'Other';
-                    if(ex){ex.copies=(Number(ex.copies)||0)+copies;ex.title=title||ex.title;ex.author=author||ex.author;ex.subject=addSubject;ex.category=addSubject;ex.coaAccountCode=LIB_COA_ACCOUNT_CODE;ex.coaCategory=LIB_COA_CATEGORY;ex.assignedUnit=LIB_ASSIGNED_UNIT;ex.measureUnit='copy';ex.icsAligned=false;ex.icsComplianceNote='Imported from legacy Book Inventory template — complete Year Level, Unit Cost, Estimated Useful Life and ICS fields.';updated++;}
-                    else{books.push({id:id,isbn:isbn,title:title,author:author,subject:addSubject,category:addSubject,yearLevel:'',copies:copies,measureUnit:'copy',unitCost:0,totalCost:0,estimatedUsefulLife:0,icsNo:'',fundCluster:'',dateAcquired:'',assignedUnit:LIB_ASSIGNED_UNIT,coaAccountCode:LIB_COA_ACCOUNT_CODE,coaCategory:LIB_COA_CATEGORY,icsAligned:false,icsComplianceNote:'Imported from legacy Book Inventory template — complete Year Level, Unit Cost, Estimated Useful Life and ICS fields.',addedAt:Date.now(),addedBy:currentSession.inCharge||''});added++;}
+                    if(ex){ex.copies=(Number(ex.copies)||0)+copies;ex.title=title||ex.title;ex.author=author||ex.author;ex.subject=addSubject;ex.category=addSubject;ex.coaAccountCode=LIB_COA_ACCOUNT_CODE;ex.coaCategory=LIB_COA_CATEGORY;ex.assignedUnit=LIB_ASSIGNED_UNIT;ex.measureUnit='copy';ex.icsAligned=false;ex.icsComplianceNote='Imported from legacy Book Inventory template — complete Year Level, Unit Cost, Estimated Useful Life and ICS fields.';_libStampCentralOwner(ex);updated++;}
+                    else{books.push(_libStampCentralOwner({id:id,isbn:isbn,title:title,author:author,subject:addSubject,category:addSubject,yearLevel:'',copies:copies,measureUnit:'copy',unitCost:0,totalCost:0,estimatedUsefulLife:0,icsNo:'',fundCluster:'',dateAcquired:'',assignedUnit:LIB_ASSIGNED_UNIT,coaAccountCode:LIB_COA_ACCOUNT_CODE,coaCategory:LIB_COA_CATEGORY,icsAligned:false,icsComplianceNote:'Imported from legacy Book Inventory template — complete Year Level, Unit Cost, Estimated Useful Life and ICS fields.',addedAt:Date.now(),addedBy:currentSession.inCharge||''}));added++;}
                     legacy++;problems.push('Row '+(idx+2)+' ('+id+'): legacy row imported; use Edit to complete ICS fields.');return;
                 }
                 if(String(assigned).trim().toLowerCase()!==LIB_ASSIGNED_UNIT.toLowerCase()){invalid++;problems.push('Row '+(idx+2)+' ('+id+'): AssignedUnit must be School Library.');return;}
@@ -6051,15 +6082,16 @@ function importBooks(){
                 if(ex){
                     if(String(ex.isbn)!==String(isbn)&&borrowLogs.some(function(log){return String(log.b)===String(ex.isbn); })){invalid++;problems.push('Row '+(idx+2)+' ('+id+'): ISBN cannot be changed because borrowing history exists for '+ex.isbn+'.');return;}
                     var counts=_libCounts(ex.isbn);var newCopies=(Number(ex.copies)||0)+copies;if(newCopies<counts.out){invalid++;problems.push('Row '+(idx+2)+' ('+id+'): resulting copies would be below accounted-out copies.');return;}
-                    ex.id=id;ex.isbn=isbn;ex.title=title;ex.author=author;ex.subject=subject;ex.category=subject;ex.yearLevel=year;ex.copies=newCopies;ex.measureUnit='copy';ex.unitCost=unitCost;ex.totalCost=Math.round(newCopies*unitCost*100)/100;ex.estimatedUsefulLife=useful;ex.icsNo=icsNo;ex.fundCluster=fund;ex.dateAcquired=date;ex.assignedUnit=LIB_ASSIGNED_UNIT;ex.coaAccountCode=LIB_COA_ACCOUNT_CODE;ex.coaCategory=LIB_COA_CATEGORY;ex.icsAligned=true;delete ex.icsComplianceNote;ex.updatedAt=Date.now();ex.updatedBy=currentSession.inCharge||'';updated++;
+                    ex.id=id;ex.isbn=isbn;ex.title=title;ex.author=author;ex.subject=subject;ex.category=subject;ex.yearLevel=year;ex.copies=newCopies;ex.measureUnit='copy';ex.unitCost=unitCost;ex.totalCost=Math.round(newCopies*unitCost*100)/100;ex.estimatedUsefulLife=useful;ex.icsNo=icsNo;ex.fundCluster=fund;ex.dateAcquired=date;ex.assignedUnit=LIB_ASSIGNED_UNIT;ex.coaAccountCode=LIB_COA_ACCOUNT_CODE;ex.coaCategory=LIB_COA_CATEGORY;ex.icsAligned=true;delete ex.icsComplianceNote;ex.updatedAt=Date.now();ex.updatedBy=currentSession.inCharge||'';_libStampCentralOwner(ex);updated++;
                 }else{
-                    books.push({id:id,isbn:isbn,title:title,author:author,subject:subject,category:subject,yearLevel:year,copies:copies,measureUnit:'copy',unitCost:unitCost,totalCost:Math.round(copies*unitCost*100)/100,estimatedUsefulLife:useful,icsNo:icsNo,fundCluster:fund,dateAcquired:date,assignedUnit:LIB_ASSIGNED_UNIT,coaAccountCode:LIB_COA_ACCOUNT_CODE,coaCategory:LIB_COA_CATEGORY,icsAligned:true,addedAt:Date.now(),addedBy:currentSession.inCharge||''});added++;
+                    books.push(_libStampCentralOwner({id:id,isbn:isbn,title:title,author:author,subject:subject,category:subject,yearLevel:year,copies:copies,measureUnit:'copy',unitCost:unitCost,totalCost:Math.round(copies*unitCost*100)/100,estimatedUsefulLife:useful,icsNo:icsNo,fundCluster:fund,dateAcquired:date,assignedUnit:LIB_ASSIGNED_UNIT,coaAccountCode:LIB_COA_ACCOUNT_CODE,coaCategory:LIB_COA_CATEGORY,icsAligned:true,addedAt:Date.now(),addedBy:currentSession.inCharge||''}));added++;
                 }
             });
         }catch(err){if(res){res.style.color='#dc2626';res.textContent='Could not read/import workbook: '+(err.message||err);}toast('❌ Library import failed.','red');return;}
         localStorage.setItem('books',JSON.stringify(books));logAudit('BULK_IMPORT_BOOKS_ICS','Added: '+added+', Updated: '+updated+', Legacy: '+legacy+', Invalid: '+invalid+' (file: '+f.name+')');
         if(res){res.style.color=(legacy||invalid)?'#b45309':'#16a34a';res.innerHTML='✅ Added: <b>'+added+'</b> &nbsp; ♻ Updated: <b>'+updated+'</b> &nbsp; 🧾 Legacy needing ICS completion: <b>'+legacy+'</b> &nbsp; ⚠ Invalid: <b>'+invalid+'</b>'+(problems.length?'<div style="margin-top:6px;font-weight:400;color:#64748b;font-size:12px;">'+problems.slice(0,18).map(_libEsc).join('<br>')+(problems.length>18?'<br>… and '+(problems.length-18)+' more':'')+'</div>':'');}
-        fileInput.value='';renderBookInventory();toast('📥 Library import complete — '+added+' added, '+updated+' updated.',(legacy||invalid)?'yellow':'green');
+        fileInput.value='';renderBookInventory();
+        await _libCommitBooksToCentral('Library template import ('+added+' added, '+updated+' updated)');
     };
     r.readAsArrayBuffer(f);
 }
