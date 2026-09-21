@@ -2513,68 +2513,78 @@ function _captureVisitorPhoto(){
     } catch(e){ return vp.value || ''; }
 }
 
-async function exportVisitorPDF(){
-    function safeText(v){
-        if(v === null || v === undefined) return '';
-        if(typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
-        try { return JSON.stringify(v); } catch(e) { return String(v); }
-    }
-    function esc(v){
-        return safeText(v).replace(/[&<>"']/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; });
-    }
-    function errorText(err){
-        if(err === null || err === undefined) return 'Unknown error';
-        if(typeof err === 'string') return err;
-        if(err.message) return String(err.message);
-        try{return JSON.stringify(err);}catch(e){return String(err);}
-    }
+function _visitorExportSignatories(){
     try{
-        var visitors = Array.isArray(logs) ? logs.filter(function(v){ return String(v && v.category || '').toUpperCase() === 'VISITOR'; }) : [];
-        if(visitors.length === 0){ alert('No visitor records found.'); return; }
-        var sigHtml = (typeof getSignatureBlock === 'function') ? safeText(getSignatureBlock()) : '';
-        var html = '<div style="font-family:Arial;padding:15px;"><h2 style="text-align:center;">Visitor Records Report</h2>' +
-                   '<p style="text-align:center;">Generated: ' + esc(new Date().toLocaleString()) + ' • Total Visitors: ' + visitors.length + '</p>';
-        visitors.forEach(function(v,i){
-            var identity = v.identityVerification ||
-                (v.identityVerificationMethod === 'MANUAL_NO_ID' ? 'MANUAL ENTRY — NO VALID ID PRESENTED' :
-                (v.idVerified === true ? 'VALID ID / OCR' : 'NOT RECORDED'));
-            var face = (v && typeof v.face === 'string' && /^data:image\/(png|jpe?g|webp);base64,/i.test(v.face))
-                ? '<img src="' + esc(v.face) + '" style="max-width:200px;max-height:180px;border:1px solid #000;object-fit:cover;">'
-                : 'No photo available';
-            html += '<div style="border:1px solid #000;padding:12px;margin-bottom:15px;page-break-inside:avoid;">' +
-                '<h3>Visitor #' + (i+1) + '</h3>' +
-                '<p><b>Name:</b> ' + esc(v.name) + '</p>' +
-                '<p><b>Date:</b> ' + esc(v.date) + '</p>' +
-                '<p><b>Time In:</b> ' + esc(v.timein) + '</p>' +
-                '<p><b>Time Out:</b> ' + esc(v.timeout) + '</p>' +
-                '<p><b>Reason:</b> ' + esc(v.reason) + '</p>' +
-                '<p><b>Identity Verification:</b> ' + esc(identity) + '</p>' +
-                '<p><b>ID Verified:</b> ' + (v.idVerified === true ? 'YES' : 'NO') + '</p>' +
-                '<div><b>Captured Face:</b><br>' + face + '</div></div>';
-        });
-        html += sigHtml + '</div>';
-        var container=document.createElement('div');
-        container.innerHTML=html;
-        if(typeof html2pdf === 'function'){
-            await html2pdf().from(container).set({
-                margin:10, filename:'Visitor_Records_Report.pdf',
-                image:{type:'jpeg',quality:0.95}, html2canvas:{scale:2,useCORS:true,logging:false},
-                jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}
-            }).save();
-            toast('✅ Visitor logs exported successfully.','green');
-            return;
-        }
-        var w=window.open('','_blank','width=1200,height=800');
-        if(!w) throw new Error('POPUP_BLOCKED');
-        w.document.open();
-        w.document.write('<!doctype html><html><head><title>Visitor Records Report</title><style>body{font-family:Arial;padding:24px}img{max-width:200px;max-height:180px}</style></head><body>'+html+'</body></html>');
-        w.document.close(); w.focus(); setTimeout(function(){w.print();},250);
-        toast('✅ Visitor logs opened for printing.','green');
+        var m=(typeof QLogExport!=='undefined'&&QLogExport.sessionMeta)?QLogExport.sessionMeta():{};
+        return {preparedBy:m.preparedBy||'',preparedPosition:m.designation||'',checkedBy:m.checkedBy||'',checkedPosition:m.checkedPosition||'',approvedBy:m.approvedBy||'',approvedPosition:m.approvedPosition||''};
+    }catch(e){return {};}
+}
+function _visitorAllExportSelection(){
+    var list=Array.isArray(logs)?logs.filter(function(v){return String(v&&v.category||'').toUpperCase()==='VISITOR';}):[];
+    return {recordKeys:list.map(function(v){return String(v._syncId||v.syncId||v.transactionId||'');}).filter(Boolean),scopeLabel:'All Visitor Records',filters:{}};
+}
+function _visitorFilteredExportSelection(){
+    try{if(typeof renderReports==='function')renderReports();}catch(e){}
+    var m=(typeof _currentReportModel!=='undefined')?_currentReportModel:null;
+    if(!m||m.type!=='VISITOR')return _visitorAllExportSelection();
+    var keys=(m.rows||[]).map(function(r){return String(r._recordKey||'');}).filter(Boolean);
+    var reason=(document.getElementById('reportCategory')||{}).value||'ALL';
+    var from=(document.getElementById('reportDateFrom')||{}).value||'';
+    var to=(document.getElementById('reportDateTo')||{}).value||'';
+    var search=(document.getElementById('reportSearch')||{}).value||'';
+    var bits=[];
+    if(reason&&reason!=='ALL')bits.push('Reason: '+reason);
+    if(from||to)bits.push('Date: '+(from||'…')+' to '+(to||'…'));
+    if(search)bits.push('Search: '+search);
+    if(!bits.length)bits.push('All Visitor Records');
+    return {recordKeys:keys,scopeLabel:bits.join(' · '),filters:{reason:reason,dateFrom:from,dateTo:to,search:search}};
+}
+async function _visitorFetchRecordHtml(selection){
+    if(!window.QLogCentral||typeof QLogCentral.exportVisitorRecordsHtml!=='function')throw new Error('Connect this device to Central before exporting Visitor records.');
+    var payload={recordKeys:(selection&&selection.recordKeys)||[],filters:(selection&&selection.filters)||{},scopeLabel:(selection&&selection.scopeLabel)||'Visitor Records',signatories:_visitorExportSignatories()};
+    return await QLogCentral.exportVisitorRecordsHtml(payload);
+}
+function _visitorOpenPrintHtml(html){
+    var w=window.open('','_blank','width=1200,height=900');
+    if(!w)throw new Error('POPUP_BLOCKED');
+    var auto='<script>window.addEventListener("load",function(){setTimeout(function(){window.print();},300);});<\\/script>';
+    w.document.open();w.document.write(String(html||'').replace('</body>',auto+'</body>'));w.document.close();w.focus();
+}
+function _visitorWaitImages(node){
+    var imgs=Array.prototype.slice.call(node.querySelectorAll('img'));
+    return Promise.all(imgs.map(function(img){return new Promise(function(resolve){if(img.complete)return resolve();img.onload=resolve;img.onerror=resolve;setTimeout(resolve,3500);});}));
+}
+async function _visitorSavePdfFromHtml(html,filename){
+    if(typeof html2pdf==='undefined'){
+        var b=new Blob([html],{type:'text/html;charset=utf-8'}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=String(filename||'QLOG_Visitor_Records.pdf').replace(/\.pdf$/i,'.html');document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(u);},1200);return;
+    }
+    var parsed=new DOMParser().parseFromString(String(html||''),'text/html');
+    var wrap=document.createElement('div');wrap.style.cssText='position:absolute;left:-100000px;top:0;width:794px;background:#fff;';
+    Array.prototype.forEach.call(parsed.querySelectorAll('style'),function(s){wrap.appendChild(s.cloneNode(true));});
+    var content=document.createElement('div');content.innerHTML=parsed.body?parsed.body.innerHTML:'';wrap.appendChild(content);document.body.appendChild(wrap);
+    await _visitorWaitImages(wrap);
+    try{
+        await html2pdf().from(wrap).set({margin:0,filename:filename||'QLOG_Visitor_Records.pdf',image:{type:'jpeg',quality:0.97},html2canvas:{scale:2,useCORS:true,logging:false},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},pagebreak:{mode:['css','legacy']}}).save();
+    }finally{wrap.remove();}
+}
+async function printVisitorRecordsFromReports(){
+    try{var sel=_visitorFilteredExportSelection();if(!sel.recordKeys.length && !(sel.filters&&Object.keys(sel.filters).some(function(k){return sel.filters[k]&&sel.filters[k]!=='ALL';}))){alert('No Visitor records match the selected filters.');return;}var html=await _visitorFetchRecordHtml(sel);_visitorOpenPrintHtml(html);toast('✅ Visitor records opened for A4 printing with backend photos.','green');}catch(err){console.error('[visitor-print]',err);toast('❌ Visitor print failed: '+(err.message||err),'red');alert('Visitor print failed.\n\n'+(err.message||err));}
+}
+async function exportVisitorRecordsFilteredPDF(){
+    try{var sel=_visitorFilteredExportSelection();if(!sel.recordKeys.length && !(sel.filters&&Object.keys(sel.filters).some(function(k){return sel.filters[k]&&sel.filters[k]!=='ALL';}))){alert('No Visitor records match the selected filters.');return;}var html=await _visitorFetchRecordHtml(sel);await _visitorSavePdfFromHtml(html,'QLOG_Visitor_Records_Filtered.pdf');toast('✅ Filtered Visitor Records PDF exported with backend photos.','green');}catch(err){console.error('[visitor-filtered-pdf]',err);toast('❌ Visitor PDF export failed: '+(err.message||err),'red');alert('Visitor PDF export failed.\n\n'+(err.message||err));}
+}
+async function exportVisitorPDF(){
+    try{
+        var sel=_visitorAllExportSelection();
+        if(!sel.recordKeys.length){alert('No visitor records found.');return;}
+        var html=await _visitorFetchRecordHtml(sel);
+        await _visitorSavePdfFromHtml(html,'QLOG_Visitor_Records_All.pdf');
+        toast('✅ All Visitor Records exported with backend photos.','green');
     }catch(err){
         console.error('[visitor-export]',err);
-        var msg=errorText(err);
-        toast('❌ Visitor log export failed: '+msg,'red');
-        alert('Visitor log export failed.\n\n'+msg);
+        var msg=(err&&err.message)?err.message:String(err||'Unknown error');
+        toast('❌ Visitor record export failed: '+msg,'red');
+        alert('Visitor record export failed.\n\n'+msg);
     }
 }
 
@@ -2607,6 +2617,6 @@ Object.assign(window,{
   retryIdScan:retryIdScan,rescanValidId:rescanValidId,switchToManualNoId:switchToManualNoId,
   continueAfterIdVerified:continueAfterIdVerified,cancelValidIdVerification:cancelValidIdVerification,
   captureIdFromMobileButton:captureIdFromMobileButton,captureIdNow:captureIdNow,
-  finishVisitorSession:finishVisitorSession,saveVisitorLog:saveVisitorLog,exportVisitorPDF:exportVisitorPDF
+  finishVisitorSession:finishVisitorSession,saveVisitorLog:saveVisitorLog,exportVisitorPDF:exportVisitorPDF,printVisitorRecordsFromReports:printVisitorRecordsFromReports,exportVisitorRecordsFilteredPDF:exportVisitorRecordsFilteredPDF
 });
 })();

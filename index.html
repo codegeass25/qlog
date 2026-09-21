@@ -1811,6 +1811,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
     <div id="reportContextNote" class="report-context-note">Choose a report type. Available filters change automatically based on the selected module.</div>
     <div class="report-hub-actions">
         <button style="background:#0f172a;" onclick="printReport()">🖨 Print A4 Report</button>
+        <button id="visitorRecordsPdfBtn" style="display:none;background:#7c3aed;" onclick="exportVisitorRecordsFilteredPDF()">📄 Download Visitor Records PDF</button>
         <button onclick="exportLogs()">📥 Download Formatted Excel</button>
         <button style="background:#64748b;" onclick="clearReportFilters()">↺ Clear Filters</button>
 
@@ -5705,7 +5706,7 @@ function _reportModel(type){
     if(type==='VISITOR'){
         model.title='Visitor Logs Report'; model.subtitle='Visitor entry/exit, reason for visit and identity-verification records'; model.filename='QLOG_Visitor_Logs.xlsx'; model.sheetName='Visitor Logs'; model.filterLabel='Reason for Visit';
         model.columns=[{key:'no',label:'No.',width:7,align:'center'},{key:'name',label:'Visitor Name',width:28},{key:'id',label:'Visitor ID',width:18},{key:'reason',label:'Reason for Visit',width:32},{key:'timeIn',label:'Time In',width:16,align:'center'},{key:'timeOut',label:'Time Out',width:16,align:'center'},{key:'date',label:'Date',width:14,align:'center'},{key:'verification',label:'Identity Verification',width:26}];
-        model.rows=logs.filter(function(l){return String(l.category||'').toUpperCase()==='VISITOR';}).map(function(l){return {name:l.name||'',id:l.id||'',reason:l.reason||'',timeIn:l.timein||'',timeOut:l.timeout||'',date:l.date||'',verification:l.identityVerification||(l.identityVerificationMethod==='MANUAL_NO_ID'?'MANUAL ENTRY — NO ID PRESENTED':(l.idVerified?'VALID ID / OCR':'')),_filter:l.reason||'',_date:_reportDateMs(l.date),_facility:l.facilityName||l.facility||'',_facilityId:l.facilityId||''};});
+        model.rows=logs.filter(function(l){return String(l.category||'').toUpperCase()==='VISITOR';}).map(function(l){return {name:l.name||'',id:l.id||'',reason:l.reason||'',timeIn:l.timein||'',timeOut:l.timeout||'',date:l.date||'',verification:l.identityVerification||(l.identityVerificationMethod==='MANUAL_NO_ID'?'MANUAL ENTRY — NO ID PRESENTED':(l.idVerified?'VALID ID / OCR':'')),_recordKey:l._syncId||l.syncId||l.transactionId||'',_filter:l.reason||'',_date:_reportDateMs(l.date),_facility:l.facilityName||l.facility||'',_facilityId:l.facilityId||''};});
     } else if(type==='CLIENT'){
         model.title='Client Inventory Report'; model.subtitle='Registered students and personnel in the QLog client registry'; model.filename='QLOG_Client_Inventory_Report.xlsx'; model.sheetName='Client Inventory'; model.filterLabel='Client Category'; model.dateFilter=false;
         model.columns=[{key:'no',label:'No.',width:7,align:'center'},{key:'id',label:'ID / LRN / Employee No.',width:22},{key:'name',label:'Complete Name',width:32},{key:'category',label:'Category',width:20},{key:'grade',label:'Grade Level',width:14,align:'center'},{key:'section',label:'Section',width:18}];
@@ -5756,6 +5757,7 @@ function updateReportControls(){
     if(to){to.disabled=!model.dateFilter;if(!model.dateFilter)to.value='';}
     var note=document.getElementById('reportContextNote');
     if(note) note.innerHTML='<b>'+_reportEsc(model.title)+'</b> — '+_reportEsc(model.subtitle)+(model.dateFilter?' Date range filters use the primary transaction/acquisition date for this report.':' This inventory report has no transaction-date filter.');
+    var visitorPdfBtn=document.getElementById('visitorRecordsPdfBtn'); if(visitorPdfBtn)visitorPdfBtn.style.display=(type==='VISITOR'?'inline-flex':'none');
     _reportLastType=type;
 }
 function _reportSummary(model,rows){
@@ -5828,6 +5830,7 @@ function printReport(){
     renderReports();
     var m=_currentReportModel;
     if(!m){alert('No report is currently selected.');return;}
+    if(m.type==='VISITOR' && typeof window.printVisitorRecordsFromReports==='function'){ window.printVisitorRecordsFromReports(); return; }
     if(typeof QLogExport!=='undefined'&&QLogExport.printTable){
         QLogExport.printTable({title:m.title,subtitle:m.subtitle,columns:m.columns,rows:m.rows,orientation:'auto',summary:m.summary});
         return;

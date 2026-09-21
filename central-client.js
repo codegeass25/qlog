@@ -259,6 +259,19 @@
     return data;
   }
 
+  async function apiText(path,options){
+    var opts=options||{};
+    opts.headers=Object.assign(headers(),opts.headers||{});
+    var res;
+    try{res=await fetch(API_BASE+path,opts);setServerReady(true);}catch(e){setServerReady(false);throw e;}
+    var body=await res.text();
+    if(!res.ok){
+      var msg='HTTP '+res.status; try{var d=JSON.parse(body);msg=d.error||d.message||msg;}catch(_e){}
+      var err=new Error(msg);err.status=res.status;err.data=body;throw err;
+    }
+    return body;
+  }
+
   function localInventoryFingerprint(o,name){
     o=o||{}; function n(v){return String(v==null?'':v).trim().toLowerCase();}
     if(name==='books'){
@@ -1052,6 +1065,11 @@
   };
   window.qlogCentralStatus=function(){return {serverReady:!!state.serverReady&&navigator.onLine,socketReady:!!(state.socket&&state.socket.connected),authenticated:!!state.token,clientId:state.sourceId,connectedClients:window.QLOG_CONNECTED_CLIENTS||0,profileKey:state.activeProfileKey};};
 
+  async function exportVisitorRecordsHtml(payload){
+    if(!state.token||!navigator.onLine) throw new Error('PROFILE_AUTH_REQUIRED');
+    return await apiText('/api/visitors/records/export.html',{method:'POST',body:JSON.stringify(payload||{})});
+  }
+
   window.QLogCentral={
     connect:function(){var i=document.getElementById('qlogCentralCode');if(i)connectWithCode(i.value.trim());},
     closeAuth:closeAuth,
@@ -1075,6 +1093,7 @@
     closeOfflineReview:closeOfflineReview,
     discardOfflineItem:discardOfflineItem,
     syncReviewedOffline:syncReviewedOffline,
+    exportVisitorRecordsHtml:exportVisitorRecordsHtml,
     getOfflineQueue:function(){return loadOfflineQueue(currentScope());}
   };
 
