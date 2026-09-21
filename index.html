@@ -1210,7 +1210,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
     <br>
     <div class="visitor-flow-status" id="visitorFlowStatus">Waiting for a visitor QR scan…</div>
     <hr>
-    <button onclick="exportVisitorPDF()">📄 Export All Visitor Records (PDF)</button>
+    <button onclick="exportVisitorHTML()">🌐 Export All Visitor Records (HTML)</button>
     </div>
 </div>
 
@@ -1811,7 +1811,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
     <div id="reportContextNote" class="report-context-note">Choose a report type. Available filters change automatically based on the selected module.</div>
     <div class="report-hub-actions">
         <button style="background:#0f172a;" onclick="printReport()">🖨 Print A4 Report</button>
-        <button id="visitorRecordsPdfBtn" style="display:none;background:#7c3aed;" onclick="exportVisitorRecordsFilteredPDF()">📄 Download Visitor Records PDF</button>
+        <button id="visitorRecordsHtmlBtn" style="display:none;background:#7c3aed;" onclick="exportVisitorRecordsFilteredHTML()">🌐 Download Visitor Records HTML</button>
         <button onclick="exportLogs()">📥 Download Formatted Excel</button>
         <button style="background:#64748b;" onclick="clearReportFilters()">↺ Clear Filters</button>
 
@@ -5757,7 +5757,7 @@ function updateReportControls(){
     if(to){to.disabled=!model.dateFilter;if(!model.dateFilter)to.value='';}
     var note=document.getElementById('reportContextNote');
     if(note) note.innerHTML='<b>'+_reportEsc(model.title)+'</b> — '+_reportEsc(model.subtitle)+(model.dateFilter?' Date range filters use the primary transaction/acquisition date for this report.':' This inventory report has no transaction-date filter.');
-    var visitorPdfBtn=document.getElementById('visitorRecordsPdfBtn'); if(visitorPdfBtn)visitorPdfBtn.style.display=(type==='VISITOR'?'inline-flex':'none');
+    var visitorHtmlBtn=document.getElementById('visitorRecordsHtmlBtn'); if(visitorHtmlBtn)visitorHtmlBtn.style.display=(type==='VISITOR'?'inline-flex':'none');
     _reportLastType=type;
 }
 function _reportSummary(model,rows){

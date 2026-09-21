@@ -8,12 +8,15 @@ var faceApiLoading = false;
 var faceDescriptorCache = []; // [{name, descriptor:Float32Array}]
 var _lastFaceMatchName = null;
 var _stableMatchCounter = 0;
+var _stableMatchKey = '';
+var _recognizedFaceKey = '';
+var _faceMismatchStreak = 0;
 var _faceDetectErrors = 0;
 var _faceLoopRunning = false;
 var _isIOSDevice = /iPad|iPhone|iPod/.test(navigator.userAgent||'') || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
 var _isMobileDevice = _isIOSDevice || /Android|Mobile/i.test(navigator.userAgent||'');
-var FACE_MATCH_THRESHOLD = 0.62;   // euclidean distance (lower = more similar)
-var FACE_MATCH_STABLE_FRAMES = _isMobileDevice ? 2 : 3;
+var FACE_MATCH_THRESHOLD = 0.50;   // conservative euclidean threshold; lower = more similar
+var FACE_MATCH_STABLE_FRAMES = 3;   // same candidate must match across consecutive frames on every device
 
 /* ---------- Offline Valid ID / OCR verification configuration ----------
    All thresholds are local; nothing here contacts the network. */
@@ -272,11 +275,37 @@ async function _faceRecognitionTick(){
         }catch(e){}
     }
 
+    function revokeStaleFaceMatch(message, force){
+        _faceMismatchStreak++;
+        _stableMatchCounter = 0;
+        _stableMatchKey = '';
+        if ((!force && _faceMismatchStreak < 2) || !st.faceRecognized) return;
+        st.faceRecognized = false;
+        st.faceRegistered = false;
+        st.mode = 'NEW';
+        st.faceImage = '';
+        st.requiresCentralFaceMatch = !!(st.centralProfile && Array.isArray(st.centralProfile.faceDescriptor) && st.centralProfile.faceDescriptor.length >= 64);
+        if (st.faceMatchedName && !st.nameEdited && _normalizeNameKey(st.name) === _normalizeNameKey(st.faceMatchedName)) {
+            setVisitorName('', '', 'clear');
+        }
+        if (st.faceIdentityReused === true) {
+            st.idVerified = false;
+            st.identityVerificationMethod = null;
+            st.nameSource = null;
+            st.faceIdentityReused = false;
+        }
+        st.faceMatchedName = '';
+        st.faceMatchedIdentityId = '';
+        _recognizedFaceKey = '';
+        _lastFaceMatchName = null;
+        _setFaceHud('detecting', message || 'Face changed. Re-identifying visitor…', 20);
+    }
+
     // MULTIPLE FACE PROTECTION
     if (dets.length > 1){
         st.faceDetected = false;
         st.faceDescriptor = null;
-        _stableMatchCounter = 0;
+        revokeStaleFaceMatch('Multiple faces detected. Previous match cleared.');
         _setFaceHud('error', '\u26a0 Multiple faces detected \u2014 only the visitor should be visible.', 0);
         setVisitorFlowStatus('\u26a0 <b>MULTIPLE FACES DETECTED</b><br>Please make sure only the visitor is visible in the camera.', 'warn');
         return;
@@ -285,7 +314,7 @@ async function _faceRecognitionTick(){
     if (dets.length === 0){
         st.faceDetected = false;
         st.faceDescriptor = null;
-        _stableMatchCounter = 0;
+        revokeStaleFaceMatch('Face left the camera. Previous match cleared.');
         _setFaceHud('detecting', 'Searching for a face\u2026', 20);
         if (st.reason && !st.logged){
             setVisitorFlowStatus('\u26a0 <b>FACE REQUIRED</b><br>Please look at the camera. The visitor will be logged automatically once the face is detected.', 'warn');
@@ -322,7 +351,7 @@ async function _faceRecognitionTick(){
         var cd = _euclidean(det.descriptor, centralFaceDirectory[c].descriptor);
         if (cd < centralBest.dist) centralBest = {dist:cd, entry:centralFaceDirectory[c], name:centralFaceDirectory[c].name};
     }
-    var CENTRAL_FACE_THRESHOLD = (_visitorCentralProfile && centralBest.entry && String(centralBest.entry.id||'')===String(_visitorCentralProfile.id||'')) ? 0.70 : 0.66;
+    var CENTRAL_FACE_THRESHOLD = (_visitorCentralProfile && centralBest.entry && String(centralBest.entry.id||'')===String(_visitorCentralProfile.id||'')) ? 0.50 : 0.50;
     if (centralBest.entry && centralBest.dist <= CENTRAL_FACE_THRESHOLD){
         best = {dist:centralBest.dist, name:centralBest.name, entry:centralBest.entry};
         second = Infinity;
@@ -341,14 +370,32 @@ async function _faceRecognitionTick(){
     var matched = best.name && best.dist <= (centralAuthoritativeMatch ? CENTRAL_FACE_THRESHOLD : FACE_MATCH_THRESHOLD) && (centralAuthoritativeMatch || margin >= 0.04);
 
     if (matched){
-        _stableMatchCounter++;
+        var candidateKey = String((best.entry && (best.entry.id || best.entry.visitorId || best.entry.profileKey)) || best.name || '').toLowerCase();
+        if (st.faceRecognized && _recognizedFaceKey && _recognizedFaceKey !== candidateKey){
+            revokeStaleFaceMatch('A different face is now in view. Previous visitor cleared.', true);
+        }
+        if (_stableMatchKey !== candidateKey){
+            _stableMatchKey = candidateKey;
+            _stableMatchCounter = 1;
+        } else {
+            _stableMatchCounter++;
+        }
+        _faceMismatchStreak = 0;
         _setFaceHud('detecting', 'Matching: ' + best.name + ' (' + (confidence*100).toFixed(0) + '%)', confidence*100);
         if (_stableMatchCounter >= FACE_MATCH_STABLE_FRAMES){
-            if (!st.faceRecognized){
+            if (!st.faceRecognized || _recognizedFaceKey !== candidateKey){
+                if (st.faceRecognized && _recognizedFaceKey && _recognizedFaceKey !== candidateKey){
+                    st.faceRecognized = false;
+                    st.faceRegistered = false;
+                    if (st.faceMatchedName && !st.nameEdited && _normalizeNameKey(st.name) === _normalizeNameKey(st.faceMatchedName)) setVisitorName('', '', 'clear');
+                }
                 st.faceRecognized = true;
                 st.mode = 'RETURNING';
                 st.faceRegistered = true;
                 st.requiresCentralFaceMatch = false;
+                st.faceMatchedName = best.name || '';
+                st.faceMatchedIdentityId = String((best.entry && (best.entry.id || best.entry.visitorId)) || '');
+                _recognizedFaceKey = candidateKey;
                 _lastFaceMatchName = best.name;
                 _setFaceHud('matched', '\u2713 ' + best.name + ' (' + (confidence*100).toFixed(0) + '%)', confidence*100);
                 toast('\U0001f916 Visitor recognized: ' + best.name, 'green');
@@ -363,6 +410,8 @@ async function _faceRecognitionTick(){
                         st.identityVerificationMethod = null;
                         st.requiresIdRecheck = false;
                         st.nameSource = 'ID_OCR';
+                        st.faceIdentityReused = true;
+                        st.faceImage = _captureVisitorPhoto();
                         setVisitorName(best.name, 'Face recognition (ID-verified profile)', 'face');
                         setVisitorFlowStatus('\u2713 Visitor identified: <b>' + best.name + '</b> (ID-verified profile). Select a <b>Reason for Visit</b> to log automatically.', 'ok');
                         try { closeValidIdScreen(); } catch(e){}
@@ -381,6 +430,8 @@ async function _faceRecognitionTick(){
         }
     } else {
         _stableMatchCounter = 0;
+        _stableMatchKey = '';
+        revokeStaleFaceMatch('Face does not match the previous visitor. Re-identifying…');
         if(st.requiresCentralFaceMatch && st.centralProfile){
             _setFaceHud('error','Face does not match the registered Central visitor yet.',0);
             setVisitorFlowStatus('Registered visitor <b>'+String(st.centralProfile.name||'')+'</b> was found, but the live face has not matched. Keep the face centered and well lit. The registered Valid ID will not be requested again.','warn');
@@ -455,6 +506,10 @@ function _requireIdRecheckForReturningVisitor(){
 /* Starts a full visitor session for a scanned unknown QR. */
 function startVisitorSession(code){
     resetVisitorRegistrationState();
+    setVisitorName('', '', 'clear');
+    var _vr=document.getElementById('visitorReason'); if(_vr) _vr.value='';
+    var _vo=document.getElementById('visitorReasonOther'); if(_vo){_vo.value='';_vo.style.display='none';}
+    var _vs=document.getElementById('visitorNameSource'); if(_vs){_vs.style.display='none';_vs.textContent='';}
     visitorRegistrationState.qr=code||'';
     visitorRegistrationState.centralLookupPending=!!(window.QLogCentral && navigator.onLine);
     visitorRegistrationState.mode='NEW';
@@ -563,7 +618,7 @@ function stopVisitorCamera(){
     var hud  = document.getElementById('faceHud'); if (hud) hud.style.display='none';
     if(faceRecogInterval){ clearTimeout(faceRecogInterval); faceRecogInterval = null; }
     _faceLoopRunning=false;
-    _stableMatchCounter = 0; _lastFaceMatchName = null;
+    _stableMatchCounter = 0; _stableMatchKey = ''; _recognizedFaceKey = ''; _faceMismatchStreak = 0; _lastFaceMatchName = null;
     try { visitorRegistrationState.faceDetected = false; visitorRegistrationState.faceDescriptor = null; } catch(e){}
 }
 
@@ -620,12 +675,17 @@ function resetVisitorRegistrationState(){
         idType: '', dob: '', faceDetected: false, faceRegistered: false, faceRecognized: false,
         faceDescriptor: null, faceImage: '', reason: '', nameSource: null, nameEdited: false, nameEditedAt: '', requiresIdRecheck: false,
         autoLogInProgress: false, logged: false, centralProfile: null, centralLookupPending: false,
-        centralIdVerified: false, requiresCentralFaceMatch: false
+        centralIdVerified: false, requiresCentralFaceMatch: false, faceMatchedName: '', faceMatchedIdentityId: '', faceIdentityReused: false
     };
     _resetIdVerificationRuntime();
     visitorAutoLogInProgress = false;
     _visitorIdentifyDeadline = 0;
     _unknownFaceStreak = 0;
+    _stableMatchCounter = 0;
+    _stableMatchKey = '';
+    _recognizedFaceKey = '';
+    _faceMismatchStreak = 0;
+    _lastFaceMatchName = null;
     _visitorCentralProfile = null;
     _visitorCentralLookupPending = false;
     centralFaceDirectory = [];
@@ -2311,7 +2371,7 @@ async function autoLogVisitorAfterReason(){
             return;
         }
 
-        var faceImage = st.faceImage || _captureVisitorPhoto();
+        var faceImage = _captureVisitorPhoto() || st.faceImage;
         if(st.mode === 'NEW' && !st.faceRegistered){
             setVisitorFlowStatus('\u23f3 Registering face\u2026', '');
             await new Promise(function(r){ setTimeout(r, 60); });
@@ -2550,75 +2610,36 @@ function _visitorOpenPrintHtml(html){
     var auto='<script>window.addEventListener("load",function(){setTimeout(function(){window.print();},300);});<\\/script>';
     w.document.open();w.document.write(String(html||'').replace('</body>',auto+'</body>'));w.document.close();w.focus();
 }
-async function _visitorWaitImages(node){
-    var imgs=Array.prototype.slice.call(node.querySelectorAll('img'));
-    await Promise.all(imgs.map(async function(img){
-        try{
-            if(img.decode) await Promise.race([img.decode(),new Promise(function(resolve){setTimeout(resolve,4500);})]);
-            else if(!img.complete) await new Promise(function(resolve){img.onload=resolve;img.onerror=resolve;setTimeout(resolve,4500);});
-        }catch(e){}
-    }));
-    return imgs;
-}
-function _visitorDrawImageToCanvas(img){
-    try{
-        if(!img || !img.naturalWidth || !img.naturalHeight) return null;
-        var rect=img.getBoundingClientRect(), css=getComputedStyle(img);
-        var dw=Math.max(1,Math.round(rect.width||parseFloat(css.width)||img.naturalWidth));
-        var dh=Math.max(1,Math.round(rect.height||parseFloat(css.height)||img.naturalHeight));
-        var scale=Math.min(2,Math.max(1,window.devicePixelRatio||1));
-        var c=document.createElement('canvas');c.width=Math.max(1,Math.round(dw*scale));c.height=Math.max(1,Math.round(dh*scale));
-        c.className=img.className||'';c.style.cssText=img.style.cssText||'';c.style.width=dw+'px';c.style.height=dh+'px';c.style.display=css.display==='none'?'none':'block';
-        var ctx=c.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,c.width,c.height);
-        var sw=img.naturalWidth,sh=img.naturalHeight,sx=0,sy=0,fit=(css.objectFit||'fill').toLowerCase();
-        if(fit==='cover'){
-            var srcRatio=sw/sh,dstRatio=dw/dh;if(srcRatio>dstRatio){var nw=sh*dstRatio;sx=(sw-nw)/2;sw=nw;}else{var nh=sw/dstRatio;sy=(sh-nh)/2;sh=nh;}
-            ctx.drawImage(img,sx,sy,sw,sh,0,0,c.width,c.height);
-        }else if(fit==='contain'){
-            var r=Math.min(c.width/img.naturalWidth,c.height/img.naturalHeight),rw=img.naturalWidth*r,rh=img.naturalHeight*r;
-            ctx.drawImage(img,0,0,img.naturalWidth,img.naturalHeight,(c.width-rw)/2,(c.height-rh)/2,rw,rh);
-        }else ctx.drawImage(img,0,0,img.naturalWidth,img.naturalHeight,0,0,c.width,c.height);
-        return c;
-    }catch(e){console.warn('[visitor-pdf] image rasterize failed',e);return null;}
-}
-async function _visitorRasterizeImages(node){
-    var imgs=await _visitorWaitImages(node);
-    imgs.forEach(function(img){var c=_visitorDrawImageToCanvas(img);if(c&&img.parentNode)img.parentNode.replaceChild(c,img);});
-}
-async function _visitorSavePdfFromHtml(html,filename){
-    if(typeof html2pdf==='undefined'){
-        var b=new Blob([html],{type:'text/html;charset=utf-8'}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=String(filename||'QLOG_Visitor_Records.pdf').replace(/\.pdf$/i,'.html');document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(u);},1200);return;
-    }
-    var parsed=new DOMParser().parseFromString(String(html||''),'text/html');
-    var wrap=document.createElement('div');wrap.style.cssText='position:fixed;left:0;top:0;width:794px;background:#fff;z-index:-2147483000;pointer-events:none;';
-    Array.prototype.forEach.call(parsed.querySelectorAll('style'),function(s){wrap.appendChild(s.cloneNode(true));});
-    var content=document.createElement('div');content.innerHTML=parsed.body?parsed.body.innerHTML:'';wrap.appendChild(content);document.body.appendChild(wrap);
-    try{
-        await _visitorRasterizeImages(wrap);
-        await new Promise(function(resolve){requestAnimationFrame(function(){requestAnimationFrame(resolve);});});
-        await html2pdf().from(wrap).set({margin:0,filename:filename||'QLOG_Visitor_Records.pdf',image:{type:'jpeg',quality:0.98},html2canvas:{scale:2,useCORS:false,allowTaint:true,logging:false,backgroundColor:'#ffffff'},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},pagebreak:{mode:['css','legacy']}}).save();
-    }finally{wrap.remove();}
+function _visitorDownloadHtml(html,filename){
+    var blob=new Blob([String(html||'')],{type:'text/html;charset=utf-8'});
+    var url=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=url;a.download=(filename||'QLOG_Visitor_Records.html').replace(/\.pdf$/i,'.html');
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(function(){URL.revokeObjectURL(url);},1500);
 }
 async function printVisitorRecordsFromReports(){
     try{var sel=_visitorFilteredExportSelection();if(!sel.recordKeys.length && !(sel.filters&&Object.keys(sel.filters).some(function(k){return sel.filters[k]&&sel.filters[k]!=='ALL';}))){alert('No Visitor records match the selected filters.');return;}var html=await _visitorFetchRecordHtml(sel);_visitorOpenPrintHtml(html);toast('✅ Visitor records opened for A4 printing with backend photos.','green');}catch(err){console.error('[visitor-print]',err);toast('❌ Visitor print failed: '+(err.message||err),'red');alert('Visitor print failed.\n\n'+(err.message||err));}
 }
-async function exportVisitorRecordsFilteredPDF(){
-    try{var sel=_visitorFilteredExportSelection();if(!sel.recordKeys.length && !(sel.filters&&Object.keys(sel.filters).some(function(k){return sel.filters[k]&&sel.filters[k]!=='ALL';}))){alert('No Visitor records match the selected filters.');return;}var html=await _visitorFetchRecordHtml(sel);await _visitorSavePdfFromHtml(html,'QLOG_Visitor_Records_Filtered.pdf');toast('✅ Filtered Visitor Records PDF exported with backend photos.','green');}catch(err){console.error('[visitor-filtered-pdf]',err);toast('❌ Visitor PDF export failed: '+(err.message||err),'red');alert('Visitor PDF export failed.\n\n'+(err.message||err));}
+async function exportVisitorRecordsFilteredHTML(){
+    try{var sel=_visitorFilteredExportSelection();if(!sel.recordKeys.length && !(sel.filters&&Object.keys(sel.filters).some(function(k){return sel.filters[k]&&sel.filters[k]!=='ALL';}))){alert('No Visitor records match the selected filters.');return;}var html=await _visitorFetchRecordHtml(sel);_visitorDownloadHtml(html,'QLOG_Visitor_Records_Filtered.html');toast('✅ Visitor Records HTML downloaded with backend photos.','green');}catch(err){console.error('[visitor-filtered-html]',err);toast('❌ Visitor HTML export failed: '+(err.message||err),'red');alert('Visitor HTML export failed.\n\n'+(err.message||err));}
 }
-async function exportVisitorPDF(){
+async function exportVisitorHTML(){
     try{
         var sel=_visitorAllExportSelection();
         if(!sel.recordKeys.length){alert('No visitor records found.');return;}
         var html=await _visitorFetchRecordHtml(sel);
-        await _visitorSavePdfFromHtml(html,'QLOG_Visitor_Records_All.pdf');
-        toast('✅ All Visitor Records exported with backend photos.','green');
+        _visitorDownloadHtml(html,'QLOG_Visitor_Records_All.html');
+        toast('✅ All Visitor Records HTML downloaded with backend photos.','green');
     }catch(err){
-        console.error('[visitor-export]',err);
+        console.error('[visitor-export-html]',err);
         var msg=(err&&err.message)?err.message:String(err||'Unknown error');
         toast('❌ Visitor record export failed: '+msg,'red');
         alert('Visitor record export failed.\n\n'+msg);
     }
 }
+// Compatibility aliases for older cached markup; both now export HTML, never PDF.
+async function exportVisitorRecordsFilteredPDF(){ return exportVisitorRecordsFilteredHTML(); }
+async function exportVisitorPDF(){ return exportVisitorHTML(); }
 
 
 document.addEventListener('visibilitychange',function(){
@@ -2649,6 +2670,6 @@ Object.assign(window,{
   retryIdScan:retryIdScan,rescanValidId:rescanValidId,switchToManualNoId:switchToManualNoId,
   continueAfterIdVerified:continueAfterIdVerified,cancelValidIdVerification:cancelValidIdVerification,
   captureIdFromMobileButton:captureIdFromMobileButton,captureIdNow:captureIdNow,
-  finishVisitorSession:finishVisitorSession,saveVisitorLog:saveVisitorLog,exportVisitorPDF:exportVisitorPDF,printVisitorRecordsFromReports:printVisitorRecordsFromReports,exportVisitorRecordsFilteredPDF:exportVisitorRecordsFilteredPDF
+  finishVisitorSession:finishVisitorSession,saveVisitorLog:saveVisitorLog,exportVisitorPDF:exportVisitorPDF,exportVisitorHTML:exportVisitorHTML,printVisitorRecordsFromReports:printVisitorRecordsFromReports,exportVisitorRecordsFilteredPDF:exportVisitorRecordsFilteredPDF,exportVisitorRecordsFilteredHTML:exportVisitorRecordsFilteredHTML
 });
 })();
