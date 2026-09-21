@@ -5859,7 +5859,7 @@ async function exportAuditTrail() {
     }
 }
 
-function exportVisitorPDF(){
+function _legacyExportVisitorPDF_DO_NOT_USE(){
     try{
         var visitors=logs.filter(function(v){return String(v.category||'').toUpperCase()==='VISITOR';}).slice().reverse();
         if(!visitors.length){alert('No visitor records found.');return;}

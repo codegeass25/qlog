@@ -2550,21 +2550,53 @@ function _visitorOpenPrintHtml(html){
     var auto='<script>window.addEventListener("load",function(){setTimeout(function(){window.print();},300);});<\\/script>';
     w.document.open();w.document.write(String(html||'').replace('</body>',auto+'</body>'));w.document.close();w.focus();
 }
-function _visitorWaitImages(node){
+async function _visitorWaitImages(node){
     var imgs=Array.prototype.slice.call(node.querySelectorAll('img'));
-    return Promise.all(imgs.map(function(img){return new Promise(function(resolve){if(img.complete)return resolve();img.onload=resolve;img.onerror=resolve;setTimeout(resolve,3500);});}));
+    await Promise.all(imgs.map(async function(img){
+        try{
+            if(img.decode) await Promise.race([img.decode(),new Promise(function(resolve){setTimeout(resolve,4500);})]);
+            else if(!img.complete) await new Promise(function(resolve){img.onload=resolve;img.onerror=resolve;setTimeout(resolve,4500);});
+        }catch(e){}
+    }));
+    return imgs;
+}
+function _visitorDrawImageToCanvas(img){
+    try{
+        if(!img || !img.naturalWidth || !img.naturalHeight) return null;
+        var rect=img.getBoundingClientRect(), css=getComputedStyle(img);
+        var dw=Math.max(1,Math.round(rect.width||parseFloat(css.width)||img.naturalWidth));
+        var dh=Math.max(1,Math.round(rect.height||parseFloat(css.height)||img.naturalHeight));
+        var scale=Math.min(2,Math.max(1,window.devicePixelRatio||1));
+        var c=document.createElement('canvas');c.width=Math.max(1,Math.round(dw*scale));c.height=Math.max(1,Math.round(dh*scale));
+        c.className=img.className||'';c.style.cssText=img.style.cssText||'';c.style.width=dw+'px';c.style.height=dh+'px';c.style.display=css.display==='none'?'none':'block';
+        var ctx=c.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,c.width,c.height);
+        var sw=img.naturalWidth,sh=img.naturalHeight,sx=0,sy=0,fit=(css.objectFit||'fill').toLowerCase();
+        if(fit==='cover'){
+            var srcRatio=sw/sh,dstRatio=dw/dh;if(srcRatio>dstRatio){var nw=sh*dstRatio;sx=(sw-nw)/2;sw=nw;}else{var nh=sw/dstRatio;sy=(sh-nh)/2;sh=nh;}
+            ctx.drawImage(img,sx,sy,sw,sh,0,0,c.width,c.height);
+        }else if(fit==='contain'){
+            var r=Math.min(c.width/img.naturalWidth,c.height/img.naturalHeight),rw=img.naturalWidth*r,rh=img.naturalHeight*r;
+            ctx.drawImage(img,0,0,img.naturalWidth,img.naturalHeight,(c.width-rw)/2,(c.height-rh)/2,rw,rh);
+        }else ctx.drawImage(img,0,0,img.naturalWidth,img.naturalHeight,0,0,c.width,c.height);
+        return c;
+    }catch(e){console.warn('[visitor-pdf] image rasterize failed',e);return null;}
+}
+async function _visitorRasterizeImages(node){
+    var imgs=await _visitorWaitImages(node);
+    imgs.forEach(function(img){var c=_visitorDrawImageToCanvas(img);if(c&&img.parentNode)img.parentNode.replaceChild(c,img);});
 }
 async function _visitorSavePdfFromHtml(html,filename){
     if(typeof html2pdf==='undefined'){
         var b=new Blob([html],{type:'text/html;charset=utf-8'}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=String(filename||'QLOG_Visitor_Records.pdf').replace(/\.pdf$/i,'.html');document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(u);},1200);return;
     }
     var parsed=new DOMParser().parseFromString(String(html||''),'text/html');
-    var wrap=document.createElement('div');wrap.style.cssText='position:absolute;left:-100000px;top:0;width:794px;background:#fff;';
+    var wrap=document.createElement('div');wrap.style.cssText='position:fixed;left:0;top:0;width:794px;background:#fff;z-index:-2147483000;pointer-events:none;';
     Array.prototype.forEach.call(parsed.querySelectorAll('style'),function(s){wrap.appendChild(s.cloneNode(true));});
     var content=document.createElement('div');content.innerHTML=parsed.body?parsed.body.innerHTML:'';wrap.appendChild(content);document.body.appendChild(wrap);
-    await _visitorWaitImages(wrap);
     try{
-        await html2pdf().from(wrap).set({margin:0,filename:filename||'QLOG_Visitor_Records.pdf',image:{type:'jpeg',quality:0.97},html2canvas:{scale:2,useCORS:true,logging:false},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},pagebreak:{mode:['css','legacy']}}).save();
+        await _visitorRasterizeImages(wrap);
+        await new Promise(function(resolve){requestAnimationFrame(function(){requestAnimationFrame(resolve);});});
+        await html2pdf().from(wrap).set({margin:0,filename:filename||'QLOG_Visitor_Records.pdf',image:{type:'jpeg',quality:0.98},html2canvas:{scale:2,useCORS:false,allowTaint:true,logging:false,backgroundColor:'#ffffff'},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},pagebreak:{mode:['css','legacy']}}).save();
     }finally{wrap.remove();}
 }
 async function printVisitorRecordsFromReports(){
