@@ -983,6 +983,21 @@
       return false;
     }finally{state.syncing=false;}
   }
+  // The guarded Visitor Check-In/Out endpoints ALREADY commit directly to
+  // Central SQLite. Mirror that canonical receipt locally without scheduling a
+  // second /api/sync of every existing attendance record. Other offline/local
+  // attendance changes continue through the existing synchronization lane.
+  function cacheCommittedVisitorRecord(record){
+    if(!record || !record._syncId || String(record.category||'').toUpperCase()!=='VISITOR')return false;
+    var list=Array.isArray(window.logs)?window.logs.slice():[];
+    var key=String(record._syncId);
+    var ix=list.findIndex(function(r){return String(r._syncId||'')===key;});
+    if(ix>=0)list[ix]=Object.assign({},list[ix],record);
+    else list.push(record);
+    setDatasetLocal('logs',list,true);
+    try{if(typeof window.renderLogs==='function')window.renderLogs();}catch(e){}
+    return true;
+  }
   function schedule(names){
     names=(names||SYNC_KEYS).filter(function(n){return SYNC_KEYS.indexOf(n)!==-1;});
     names.forEach(function(n){state.pending.add(n);});
@@ -1280,6 +1295,7 @@
     visitorPassStatus:visitorPassStatus,
     visitorCheckIn:visitorCheckIn,
     visitorCheckOut:visitorCheckOut,
+    cacheCommittedVisitorRecord:cacheCommittedVisitorRecord,
     profileChanged:profileChanged,
     showOfflineReview:showOfflineReview,
     closeOfflineReview:closeOfflineReview,

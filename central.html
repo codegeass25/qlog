@@ -216,7 +216,30 @@ function pickClient(row,keys){for(const k in row){if(!Object.prototype.hasOwnPro
 async function importCentralClients(input){const file=input.files&&input.files[0];input.value='';if(!file)return;try{if(typeof XLSX==='undefined')throw new Error('Excel library is unavailable.');const buf=await file.arrayBuffer(),wb=XLSX.read(buf,{type:'array'}),sn=wb.SheetNames.includes('Client Inventory')?'Client Inventory':wb.SheetNames[0],raw=XLSX.utils.sheet_to_json(wb.Sheets[sn],{defval:''}),rows=[];raw.forEach(r=>{const id=pickClient(r,['id','clientid','studentid','learnerid','employeeid']),name=pickClient(r,['name','fullname','completename','clientname']);if(!id||!name)return;rows.push({id,name,grade:pickClient(r,['grade','gradelevel','yearlevel']),section:pickClient(r,['section']),category:pickClient(r,['category','type','clientcategory'])});});if(!rows.length)throw new Error('No valid rows found. Required columns: ID and Name.');if(!confirm('Import '+rows.length+' Client Inventory record(s) into Central? Existing IDs will be updated; duplicates are not added.'))return;const d=await api('/api/admin/client-inventory/import',{method:'POST',body:JSON.stringify({rows})});alert('Central Client Inventory import complete. Added: '+d.created+' · Updated: '+d.updated+' · Unchanged: '+d.unchanged+' · Rejected: '+d.rejected);await refreshAll();if(currentKind==='people'){await loadKind('people');renderCurrent();}}catch(e){alert('Client Inventory import failed: '+e.message);}}
 
 async function resetEntireDatabase(){if(!confirm('RESET CENTRAL OPERATIONAL DATA? This removes operational records but preserves Central devices, profile assignments, access configuration and School & Branding. This cannot be undone unless you have a backup.'))return;if(prompt('Type RESET CENTRAL to continue')!=='RESET CENTRAL')return;try{await api('/api/admin/reset-operational',{method:'POST'});alert('Central operational data reset completed. Devices, profiles and School & Branding were preserved.');await refreshAll();closeDetail();closeCentralSettings();}catch(e){alert('Reset failed: '+e.message);}}
-async function connectSocket(){try{await ensureSocketClient();if(_centralSocket){try{_centralSocket.disconnect();}catch(_){}}const s=_centralSocket=io(String(window.QLOG_API_BASE||'').replace(/\/$/,''),{transports:['websocket','polling']});s.on('connect',()=>document.getElementById('conn').textContent='● Socket.IO live · '+new Date().toLocaleString());s.on('connect_error',(e)=>{const el=document.getElementById('conn');if(el)el.textContent='● Central live reconnecting…';console.warn('[central-socket]',e&&e.message||e);});s.on('qlog:updated',async(event)=>{if(event&&event.summary){applySummary(event.summary);}else{await refreshAll();}if(currentKind&&document.getElementById('detailOverlay').classList.contains('show')){await loadKind(currentKind);renderCurrent();}});['certificates:changed','eipcrf:changed','tna:changed'].forEach(evt=>s.on(evt,async()=>{await refreshAll();if(currentKind&&document.getElementById('detailOverlay').classList.contains('show')&&['certificates','eipcrf','tna'].includes(currentKind)){await loadKind(currentKind);renderCurrent();}}));s.on('qlog:central_reset',async()=>{await refreshAll();if(currentKind&&document.getElementById('detailOverlay').classList.contains('show')){await loadKind(currentKind);renderCurrent();}});s.on('qlog:central_restored',async()=>{await refreshAll();if(currentKind&&document.getElementById('detailOverlay').classList.contains('show')){await loadKind(currentKind);renderCurrent();}});}catch(e){const el=document.getElementById('conn');if(el)el.textContent='● Central live unavailable';console.warn('[central-socket-load]',e);}}
+// Coalesce quick successions of visitor/attendance sync broadcasts. Without
+// this, every event re-downloads and re-renders the entire active Central card.
+let _centralLiveRefreshTimer=null,_centralLiveRefreshBusy=false,_centralLiveRefreshAgain=false;
+function queueCentralLiveRefresh(){
+  if(_centralLiveRefreshBusy){_centralLiveRefreshAgain=true;return;}
+  clearTimeout(_centralLiveRefreshTimer);
+  _centralLiveRefreshTimer=setTimeout(async()=>{
+    if(_centralLiveRefreshBusy){_centralLiveRefreshAgain=true;return;}
+    _centralLiveRefreshBusy=true;
+    try{
+      await refreshAll();
+      const kind=currentKind;
+      if(kind&&document.getElementById('detailOverlay').classList.contains('show')){
+        await loadKind(kind);
+        if(currentKind===kind)renderCurrent();
+      }
+    }catch(e){console.warn('[central-live-refresh]',e);}
+    finally{
+      _centralLiveRefreshBusy=false;
+      if(_centralLiveRefreshAgain){_centralLiveRefreshAgain=false;queueCentralLiveRefresh();}
+    }
+  },450);
+}
+async function connectSocket(){try{await ensureSocketClient();if(_centralSocket){try{_centralSocket.disconnect();}catch(_){}}const s=_centralSocket=io(String(window.QLOG_API_BASE||'').replace(/\/$/,''),{transports:['websocket','polling']});s.on('connect',()=>document.getElementById('conn').textContent='● Socket.IO live · '+new Date().toLocaleString());s.on('connect_error',(e)=>{const el=document.getElementById('conn');if(el)el.textContent='● Central live reconnecting…';console.warn('[central-socket]',e&&e.message||e);});s.on('qlog:updated',(event)=>{if(event&&event.summary)applySummary(event.summary);queueCentralLiveRefresh();});['certificates:changed','eipcrf:changed','tna:changed'].forEach(evt=>s.on(evt,queueCentralLiveRefresh));s.on('qlog:central_reset',async()=>{await refreshAll();if(currentKind&&document.getElementById('detailOverlay').classList.contains('show')){await loadKind(currentKind);renderCurrent();}});s.on('qlog:central_restored',async()=>{await refreshAll();if(currentKind&&document.getElementById('detailOverlay').classList.contains('show')){await loadKind(currentKind);renderCurrent();}});}catch(e){const el=document.getElementById('conn');if(el)el.textContent='● Central live unavailable';console.warn('[central-socket-load]',e);}}
 (function boot(){const t=sessionStorage.getItem('qlogCentralAdmin');if(t){adminToken=t;document.getElementById('login').classList.add('hidden');document.getElementById('app').classList.remove('hidden');refreshAll().then(connectSocket);}})();
 </script>
 </body>

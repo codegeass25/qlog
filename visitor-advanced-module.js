@@ -181,9 +181,12 @@ async function _loadCentralVisitorProfile(qr){
 
 async function _loadCentralVisitorFaces(force){
     if(!navigator.onLine || !window.QLogCentral || typeof window.QLogCentral.lookupVisitorFaces!=='function') return centralFaceDirectory;
-    if(_centralFaceDirectoryPromise && !force) return _centralFaceDirectoryPromise;
+    if(_centralFaceDirectoryPromise) return _centralFaceDirectoryPromise;
     var now=Date.now();
-    if(!force && centralFaceDirectory.length && (now-_centralFaceDirectoryLastAttempt)<5000) return centralFaceDirectory;
+    // Burst of socket and reconcile notifications must not download the same
+    // face directory repeatedly. A forced update is still performed after a
+    // short bounded coalescing window.
+    if(centralFaceDirectory.length && (now-_centralFaceDirectoryLastAttempt)<(force?1500:10000)) return centralFaceDirectory;
     _centralFaceDirectoryPromise=(async function(){
         _visitorCentralLookupPending=true;
         try{
@@ -425,12 +428,16 @@ async function handleGuardVisitorQRScan(code,report){
         var index=logs.findIndex(function(x){return x.visitorVisitId===active.visitId||x._syncId===rec._syncId;});
         if(index>=0)logs[index]=Object.assign({},logs[index],rec);
         else logs.push(rec);
-        try{saveAll();}catch(e){console.warn('[visitor] local time-out cache save failed',e);}
+        try{
+            if(window.QLogCentral&&QLogCentral.cacheCommittedVisitorRecord)QLogCentral.cacheCommittedVisitorRecord(rec);
+            else saveAll();
+        }catch(e){console.warn('[visitor] local time-out cache save failed',e);}
         _guardVisitorQrCooldown[code]=Date.now()+2500;
         try{renderLogs();}catch(_){}
         toast('🔴 '+String(rec.name||active.name||'Visitor')+' — TIME OUT at '+String(rec.timeout||''),'red');
         if(typeof report==='function')report('🔴 '+String(rec.name||'Visitor')+' TIMED OUT','#dc2626');
-        if(window.QLogCentral&&QLogCentral.syncDatasetsNow)QLogCentral.syncDatasetsNow(['logs']).catch(function(){});
+        // Checkout was already written by /api/visitors/check-out.
+        // Do not re-send the entire local attendance history as a new sync.
         return true;
     }catch(e){
         var msg=e&&e.message||'Central unavailable';
@@ -2273,15 +2280,23 @@ async function captureAndLogVisitor(){
         if(!rec._syncId)throw new Error('Central did not return a saved visit.');
         // Central has ALREADY committed. Local storage is just an offline mirror.
         var oldIndex=logs.findIndex(function(x){return x._syncId===rec._syncId;});
-        var localRec=Object.assign({},rec,{face:img});
+        // The Central Hub has already stored the captured photo under photoRef.
+        // Do not embed the same full base64 image in local logs: doing so sends
+        // multi-hundred-KB images back through /api/sync and slows every refresh.
+        // Keep the 128-value descriptor for local face-recognition fallback.
+        var localRec=Object.assign({},rec);
         if(oldIndex>=0)logs[oldIndex]=localRec;else logs.push(localRec);
-        try{saveAll();}catch(e){console.warn('[visitor] Central committed; local cache unavailable',e);}
+        try{
+            if(window.QLogCentral&&QLogCentral.cacheCommittedVisitorRecord)QLogCentral.cacheCommittedVisitorRecord(localRec);
+            else saveAll();
+        }catch(e){console.warn('[visitor] Central committed; local cache unavailable',e);}
         st.logged=true;
         _guardVisitorQrCooldown[st.qr]=Date.now()+8000; // held QR must not instantly TIME OUT
         setVisitorFlowStatus('✓ VISITOR LOGGED: '+String(rec.name||name)+' — '+String(rec.timein||''),'ok');
         toast('✅ '+String(rec.name||name)+' — TIME IN at '+String(rec.timein||''),'green');
         try{renderLogs();}catch(_){}
-        if(window.QLogCentral&&QLogCentral.syncDatasetsNow)QLogCentral.syncDatasetsNow(['logs']).catch(function(){});
+        // The Central check-in API already committed this visit. Avoid a
+        // redundant full-dataset sync; maintain the local mirror only.
         setTimeout(finishVisitorSession,1300);
     }catch(e){
         setVisitorFlowStatus('❌ '+String(e&&e.message||'Unable to save visitor')+' — correct and retry.','err');

@@ -40,6 +40,12 @@ function reportTypes(){
 
 function recordUnit(record,type){
   record=record||{};
+  // Guard visitor visits use a permanent Central profile key for ownership.
+  // Previous builds accidentally wrote that hashed key into facilityId, whereas
+  // the Live Monitor filters by the human-readable facility.  The server-signed
+  // visit also includes facilityName: use it only for those canonical visits.
+  if(String(type||'').toUpperCase()==='VISITOR' && record.visitorVisitId && text(record.facilityName))
+    return unitKey(record.facilityName);
   if(record.facilityId) return unitKey(record.facilityId);
   var raw=record._facilityId || record._facility || record.facilityName || record.facility || record.assignedUnit || record.unit || '';
   if(raw) return unitKey(raw);
