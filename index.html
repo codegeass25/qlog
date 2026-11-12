@@ -3749,86 +3749,110 @@ function importExcel(){
 }
 
 function processScan(code){
-    if(!code) return;
-    // A successful scan must always belong to an active facility. Without this,
-    // scope filtering can hide the newly-created row immediately after it is saved.
+    code = String(code || '').trim();
+    if(!code) return false;
     if(!currentSession || !String(currentSession.facility||'').trim()){
         toast('⚠️ Please complete the active facility/profile setup before scanning.','yellow');
-        return;
+        return false;
     }
-    var now = Date.now();
-    if(isDupBlocked(code)){ dupBlockToast(); return; }
-    
-    var pArray = people.filter(function(x){ return x.id === code; });
-    var p = pArray.length > 0 ? pArray[0] : null;
+    if(isDupBlocked(code)){ dupBlockToast(); return false; }
+
+    var p = people.find(function(x){ return String(x.id) === code; }) || null;
     var scanMsg = document.getElementById('scanMsg');
-    
+    function setResult(message,color){
+        if(scanMsg){scanMsg.textContent=message;scanMsg.style.color=color;}
+        if(typeof window.qlogLiveScanSuccess==='function') window.qlogLiveScanSuccess();
+    }
     if(!p){
-        var revLogs = logs.slice().reverse();
-        var openVisitorArray = revLogs.filter(function(x) { return x.id === code && x.category === 'VISITOR' && !x.timeout && (!window.QLogScope || QLogScope.recordBelongs(x, 'VISITOR')); });
-        var openVisitor = openVisitorArray.length > 0 ? openVisitorArray[0] : null;
+        var openVisitor = logs.slice().reverse().find(function(x){
+            return String(x.id) === code && x.category === 'VISITOR' && !x.timeout &&
+                (!window.QLogScope || QLogScope.recordBelongs(x, 'VISITOR'));
+        });
         if(openVisitor){
+            var oldTimeout = openVisitor.timeout;
             var vtTime = new Date().toLocaleTimeString();
             openVisitor.timeout = vtTime;
-            saveAll(); renderLogs();
-            markDup(code, Date.now());
+            try {
+                saveAll();
+                markDup(code, Date.now());
+            } catch(err) {
+                openVisitor.timeout = oldTimeout;
+                console.error('[QLog attendance] visitor time-out save failed:', err);
+                toast('❌ Visitor time-out could not be saved. Please retry.','red');
+                return false;
+            }
+            try { renderLogs(); } catch(err) { console.warn('[QLog] render logs:',err); }
             toast('🔴 ' + openVisitor.name + ' — TIME OUT at ' + vtTime, 'red');
-            stopVisitorCamera(); hideVisitorTab(); showTab('live', document.querySelector('.nav button:nth-child(1)'));
-            scanMsg.innerHTML = '🔴 ' + openVisitor.name + ' TIMED OUT'; scanMsg.style.color = '#dc2626';
-            return;
+            try {
+                stopVisitorCamera(); hideVisitorTab();
+                showTab('live', document.querySelector('.nav button:nth-child(1)'));
+            } catch(err) { console.warn('[QLog] restoring Live Monitor:',err); }
+            setResult('🔴 ' + openVisitor.name + ' TIMED OUT', '#dc2626');
+            return true;
         }
-        // NEW/UNKNOWN visitor QR: do NOT start the 30s dedup timer here.
-        // The dedup window starts only after saveVisitorLog() persists the TIME-IN.
+        // Keep the existing identity verification flow for new/unknown visitors.
+        // No duplicate cooldown until visitor TIME-IN is persisted.
         pendingVisitorQR = code;
         startVisitorSession(code);
-        return;
+        return true;
     }
-    
-    // Reserve the scan BEFORE mutating logs. Camera/USB decoders can emit the
-    // same code more than once in the same frame; this makes the action atomic.
-    if(!reserveScanAction(code)){ dupBlockToast(); return; }
-    try{
-        var openArray = logs.slice().reverse().filter(function(x){ return x.id === code && !x.timeout && (!window.QLogScope || QLogScope.recordBelongs(x, 'ATTENDANCE')); });
-        var openLog = openArray.length > 0 ? openArray[0] : null;
+
+    if(!reserveScanAction(code)){ dupBlockToast(); return false; }
+    try {
+        var openLog = logs.slice().reverse().find(function(x){
+            return String(x.id) === code && !x.timeout &&
+                (!window.QLogScope || QLogScope.recordBelongs(x, 'ATTENDANCE'));
+        });
         var actionTime = new Date().toLocaleTimeString();
         var actionToast = '';
+        var createdLog = null;
+        var previousTimeout = openLog ? openLog.timeout : null;
         if(openLog){
             openLog.timeout = actionTime;
-            scanMsg.innerHTML = '🔴 ' + p.name + ' TIMED OUT'; scanMsg.style.color = '#dc2626';
             actionToast = '🔴 ' + p.name + ' — TIME OUT at ' + actionTime;
         } else {
-            logs.push({ id: p.id, name: p.name, category: p.category, gs: (p.grade && p.section) ? p.grade + ' - ' + p.section : '', timein: actionTime, timeout: '', date: new Date().toLocaleDateString(), facilityName:(currentSession&&currentSession.facility)||'', facilityId:(window.QLogScope&&QLogScope.unitKey)?QLogScope.unitKey((currentSession&&currentSession.facility)||''):'', _syncId:newQlogSyncId() });
-            scanMsg.innerHTML = '✅ ' + p.name + ' TIMED IN'; scanMsg.style.color = '#16a34a';
+            createdLog = {
+                id: p.id, name: p.name, category: p.category,
+                gs: (p.grade && p.section) ? p.grade + ' - ' + p.section : '',
+                timein: actionTime, timeout: '', date: new Date().toLocaleDateString(),
+                facilityName: (currentSession&&currentSession.facility)||'',
+                facilityId: (window.QLogScope&&QLogScope.unitKey) ? QLogScope.unitKey((currentSession&&currentSession.facility)||'') : '',
+                _syncId: newQlogSyncId()
+            };
+            logs.push(createdLog);
             actionToast = '✅ ' + p.name + ' — TIME IN at ' + actionTime;
         }
-        updateLiveMonitorClock();
-        saveAll(); renderLogs();
-        toast(actionToast, openLog ? 'red' : 'green');
-    } finally { releaseScanAction(code); }
+        try {
+            saveAll();
+        } catch(err) {
+            // A failed local save is not a successful scan. Restore in-memory state
+            // and clear the newly reserved cooldown so a retry is possible.
+            if(openLog) openLog.timeout = previousTimeout;
+            else if(createdLog){
+                var index = logs.indexOf(createdLog);
+                if(index !== -1) logs.splice(index,1);
+            }
+            delete dup[code];
+            console.error('[QLog attendance] attendance save failed:',err);
+            toast('❌ Attendance could not be saved. Please retry.','red');
+            return false;
+        }
+        try { updateLiveMonitorClock(); renderLogs(); } catch(err) {
+            // Persisted attendance stays valid even if a visual refresh fails.
+            console.warn('[QLog attendance] UI refresh failed after save:',err);
+        }
+        setResult((openLog ? '🔴 ' : '✅ ') + p.name + (openLog ? ' TIMED OUT' : ' TIMED IN'),
+            openLog ? '#dc2626' : '#16a34a');
+        toast(actionToast,openLog ? 'red' : 'green');
+        return true;
+    } finally {
+        releaseScanAction(code);
+    }
 }
 
-// Live Monitor USB Scanner Event Binding
-var scanTimer;
+// Continuous USB scan listeners (Live/Book Borrowing/Equipment) are
+// initialized by qlog-continuous-scanner.js after the original app loads.
 var scannerInput = document.getElementById('scanner');
-if(scannerInput) {
-    scannerInput.addEventListener('input', function(){
-        clearTimeout(scanTimer);
-        scanTimer = setTimeout(function(){ processScan(scannerInput.value.trim()); scannerInput.value = ''; }, 80);
-    });
-}
-
-// Borrow Tab USB Scanner Event Binding
-var borrowScanTimer;
-var borrowScannerInput = document.getElementById('borrowHiddenScanner');
-if(borrowScannerInput) {
-    borrowScannerInput.addEventListener('input', function(){
-        clearTimeout(borrowScanTimer);
-        borrowScanTimer = setTimeout(function(){ 
-            processBorrowScan(borrowScannerInput.value.trim()); 
-            borrowScannerInput.value = ''; 
-        }, 80);
-    });
-}
 
 /* =====================================================================
    VISITOR WORKFLOW ENGINE
@@ -7889,14 +7913,7 @@ function printEquipLogs(){
 
 /* ---------- Wiring into the existing app lifecycle ---------- */
 (function(){
-    var hs = document.getElementById('equipHiddenScanner');
-    var t;
-    if(hs){
-        hs.addEventListener('input', function(){
-            clearTimeout(t);
-            t = setTimeout(function(){ processEquipScan(hs.value.trim()); hs.value = ''; }, 80);
-        });
-    }
+    // Equipment USB scan events are bound once by the continuous scanner module.
 
     var _origFinalize = window.finalizeStartup;
     window.finalizeStartup = function(isLibrarian){
@@ -8252,5 +8269,6 @@ window.addEventListener('qlog:central-ready',function(){
 })();
 </script>
 
+<script src="./qlog-continuous-scanner.js"></script>
 </body>
 </html>
