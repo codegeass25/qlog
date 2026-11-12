@@ -2475,8 +2475,8 @@ function _visitorExportSignatories(){
     }catch(e){return {};}
 }
 function _visitorAllExportSelection(){
-    var list=Array.isArray(logs)?logs.filter(function(v){return String(v&&v.category||'').toUpperCase()==='VISITOR';}):[];
-    return {recordKeys:list.map(function(v){return String(v._syncId||v.syncId||v.transactionId||'');}).filter(Boolean),scopeLabel:'All Visitor Records',filters:{}};
+    var list=(_qlogVisitorReportRows && _qlogVisitorReportScope===qlogVisitorReportScope())?_qlogVisitorReportRows:[];
+    return {recordKeys:list.map(function(v){return String(v._reportRecordKey||v.recordKey||'');}).filter(Boolean),scopeLabel:'All Visitor Records',filters:{}};
 }
 function _visitorFilteredExportSelection(){
     try{if(typeof renderReports==='function')renderReports();}catch(e){}
@@ -2513,13 +2513,13 @@ function _visitorDownloadHtml(html,filename){
     setTimeout(function(){URL.revokeObjectURL(url);},1500);
 }
 async function printVisitorRecordsFromReports(){
-    try{var sel=_visitorFilteredExportSelection();if(!sel.recordKeys.length && !(sel.filters&&Object.keys(sel.filters).some(function(k){return sel.filters[k]&&sel.filters[k]!=='ALL';}))){alert('No Visitor records match the selected filters.');return;}var html=await _visitorFetchRecordHtml(sel);_visitorOpenPrintHtml(html);toast('✅ Visitor records opened for A4 printing with backend photos.','green');}catch(err){console.error('[visitor-print]',err);toast('❌ Visitor print failed: '+(err.message||err),'red');alert('Visitor print failed.\n\n'+(err.message||err));}
+    try{if(!_qlogVisitorReportRows || _qlogVisitorReportLoading)throw new Error('Load Visitor Logs from Central Hub first.');var sel=_visitorFilteredExportSelection();if(!sel.recordKeys.length && !(sel.filters&&Object.keys(sel.filters).some(function(k){return sel.filters[k]&&sel.filters[k]!=='ALL';}))){alert('No Visitor records match the selected filters.');return;}var html=await _visitorFetchRecordHtml(sel);_visitorOpenPrintHtml(html);toast('✅ Visitor records opened for A4 printing with backend photos.','green');}catch(err){console.error('[visitor-print]',err);toast('❌ Visitor print failed: '+(err.message||err),'red');alert('Visitor print failed.\n\n'+(err.message||err));}
 }
 async function exportVisitorRecordsFilteredHTML(){
-    try{var sel=_visitorFilteredExportSelection();if(!sel.recordKeys.length && !(sel.filters&&Object.keys(sel.filters).some(function(k){return sel.filters[k]&&sel.filters[k]!=='ALL';}))){alert('No Visitor records match the selected filters.');return;}var html=await _visitorFetchRecordHtml(sel);_visitorDownloadHtml(html,'QLOG_Visitor_Records_Filtered.html');toast('✅ Visitor Records HTML downloaded with backend photos.','green');}catch(err){console.error('[visitor-filtered-html]',err);toast('❌ Visitor HTML export failed: '+(err.message||err),'red');alert('Visitor HTML export failed.\n\n'+(err.message||err));}
+    try{if(!_qlogVisitorReportRows || _qlogVisitorReportLoading)throw new Error('Load Visitor Logs from Central Hub first.');var sel=_visitorFilteredExportSelection();if(!sel.recordKeys.length && !(sel.filters&&Object.keys(sel.filters).some(function(k){return sel.filters[k]&&sel.filters[k]!=='ALL';}))){alert('No Visitor records match the selected filters.');return;}var html=await _visitorFetchRecordHtml(sel);_visitorDownloadHtml(html,'QLOG_Visitor_Records_Filtered.html');toast('✅ Visitor Records HTML downloaded with backend photos.','green');}catch(err){console.error('[visitor-filtered-html]',err);toast('❌ Visitor HTML export failed: '+(err.message||err),'red');alert('Visitor HTML export failed.\n\n'+(err.message||err));}
 }
 async function exportVisitorHTML(){
-    try{
+    try{if(!_qlogVisitorReportRows || _qlogVisitorReportLoading)await qlogRefreshVisitorReports(true);
         var sel=_visitorAllExportSelection();
         if(!sel.recordKeys.length){alert('No visitor records found.');return;}
         var html=await _visitorFetchRecordHtml(sel);

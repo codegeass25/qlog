@@ -52,8 +52,19 @@ function recordUnit(record,type){
   if(/^LIBRARY_/.test(type||'')) return 'SCHOOL_LIBRARY';
   return '';
 }
+// Reject mixed-origin browser cache rows: a stored unit key must agree with
+// the human-readable owning unit. The known 2026 Visitor Visit legacy format
+// carries a hashed facilityId, so canonical visit records use facilityName.
+function recordHasConflictingUnit(record,type){
+  record=record||{};
+  if(String(type||'').toUpperCase()==='VISITOR' && record.visitorVisitId && text(record.facilityName))return false;
+  var label=text(record._facility||record.facilityName||record.facility||record.assignedUnit||record.unit);
+  var stamped=text(record._facilityId||record.facilityId);
+  return !!(label&&stamped&&unitKey(label)!==unitKey(stamped));
+}
 function recordBelongs(record,type){
   if(isSuperScope()) return true;
+  if(recordHasConflictingUnit(record,type)) return false;
   var rk=recordUnit(record,type), ck=currentKey();
   if(!ck) return false;
   if(!rk) return false; // legacy/unassigned remains isolated until deliberately migrated

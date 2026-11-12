@@ -1833,7 +1833,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
         <span class="ics-account-chip">OFFLINE • A4 PRINT/EXCEL READY</span>
     </div>
     <div class="report-hub-controls" style="margin-top:14px;">
-        <div><label>Report / Log Type</label><select id="reportType" onchange="updateReportControls();renderReports();">
+        <div><label>Report / Log Type</label><select id="reportType" onchange="updateReportControls();renderReports();if(this.value==='VISITOR')qlogRefreshVisitorReports();">
             <option value="ATTENDANCE">Dashboard / Attendance Logbook</option>
             <option value="VISITOR">Visitor Logs</option>
             <option value="CLIENT">Client Inventory</option>
@@ -3573,6 +3573,14 @@ function showTab(id, btn){
         stopCameraScanner(); stopBorrowCameraScanner(); stopEquipCameraScanner();
     }
     
+    if(id === 'reports') {
+        // Guard Post uses visitor logging most; other offices retain their
+        // existing selected report type. Both fetch Central visitor history.
+        var rt=document.getElementById('reportType');
+        if(rt && typeof isGuardWatchmanSession==='function' && isGuardWatchmanSession())rt.value='VISITOR';
+        updateReportControls();renderReports();
+        if(rt && rt.value==='VISITOR')qlogRefreshVisitorReports(true);
+    }
     if(id === 'reservationsTab') { renderReservations(); }
 }
 
@@ -5832,6 +5840,49 @@ function renderLogs(){
 }
 
 
+// Visitor reports are fetched from authenticated Central SQLite, not from a
+// potentially stale or different office's browser-local attendance cache.
+var _qlogVisitorReportRows=null, _qlogVisitorReportScope='',
+    _qlogVisitorReportLoading=false, _qlogVisitorReportError='';
+function qlogVisitorReportScope(){
+    if(!window.QLogCentral)return '';
+    return String(QLogCentral.getProfileKey()||'')+'|'+String(QLogCentral.getFacility()||'');
+}
+function qlogResetVisitorReports(){
+    _qlogVisitorReportRows=null;_qlogVisitorReportScope='';
+    _qlogVisitorReportLoading=false;_qlogVisitorReportError='';
+}
+async function qlogRefreshVisitorReports(force){
+    if(!window.QLogCentral || typeof QLogCentral.fetchVisitorReports!=='function'){
+        _qlogVisitorReportError='Central reporting client is unavailable';renderReports();return;
+    }
+    var scope=qlogVisitorReportScope();
+    if(!scope || scope.charAt(0)==='|'){
+        qlogResetVisitorReports();_qlogVisitorReportError='Connect this in-charge to Central Hub';renderReports();return;
+    }
+    if(_qlogVisitorReportLoading)return;
+    if(!force && _qlogVisitorReportRows && _qlogVisitorReportScope===scope)return;
+    if(_qlogVisitorReportScope!==scope){_qlogVisitorReportRows=null;_qlogVisitorReportScope=scope;}
+    _qlogVisitorReportLoading=true;_qlogVisitorReportError='';renderReports();
+    try{
+        var response=await QLogCentral.fetchVisitorReports();
+        if(qlogVisitorReportScope()!==scope)return; // changed account during network request
+        if(!response || !response.ok || !Array.isArray(response.records))throw new Error('Invalid visitor report response');
+        _qlogVisitorReportRows=response.records;_qlogVisitorReportScope=scope;
+    }catch(e){
+        if(qlogVisitorReportScope()===scope){_qlogVisitorReportRows=null;_qlogVisitorReportError=e&&e.message||'Central fetch unavailable';}
+    }finally{
+        if(qlogVisitorReportScope()===scope){_qlogVisitorReportLoading=false;updateReportControls();renderReports();}
+    }
+}
+window.addEventListener('qlog:central-profile-switched',function(){
+    qlogResetVisitorReports();
+    if(document.getElementById('reports')?.classList.contains('active'))qlogRefreshVisitorReports(true);
+});
+window.addEventListener('qlog:central-ready',function(){
+    qlogResetVisitorReports();
+    if(document.getElementById('reports')?.classList.contains('active'))qlogRefreshVisitorReports(true);
+});
 var _currentReportModel = null;
 var _reportLastType = '';
 
@@ -5870,7 +5921,8 @@ function _reportModel(type){
     if(type==='VISITOR'){
         model.title='Visitor Logs Report'; model.subtitle='Visitor entry/exit, reason for visit and identity-verification records'; model.filename='QLOG_Visitor_Logs.xlsx'; model.sheetName='Visitor Logs'; model.filterLabel='Reason for Visit';
         model.columns=[{key:'no',label:'No.',width:7,align:'center'},{key:'name',label:'Visitor Name',width:28},{key:'id',label:'Visitor ID',width:18},{key:'reason',label:'Reason for Visit',width:32},{key:'timeIn',label:'Time In',width:16,align:'center'},{key:'timeOut',label:'Time Out',width:16,align:'center'},{key:'date',label:'Date',width:14,align:'center'},{key:'verification',label:'Identity Verification',width:26}];
-        model.rows=logs.filter(function(l){return String(l.category||'').toUpperCase()==='VISITOR';}).map(function(l){return {name:l.name||'',id:l.id||'',reason:l.reason||'',timeIn:l.timein||'',timeOut:l.timeout||'',date:l.date||'',verification:l.identityVerification||(l.identityVerificationMethod==='MANUAL_NO_ID'?'MANUAL ENTRY — NO ID PRESENTED':(l.idVerified?'VALID ID / OCR':'')),_recordKey:l._syncId||l.syncId||l.transactionId||'',_filter:l.reason||'',_date:_reportDateMs(l.date),_facility:l.facilityName||l.facility||'',_facilityId:l.facilityId||''};});
+        var visitorSource=(_qlogVisitorReportScope===qlogVisitorReportScope()&&Array.isArray(_qlogVisitorReportRows))?_qlogVisitorReportRows:[];
+        model.rows=visitorSource.filter(function(l){return String(l.category||'').toUpperCase()==='VISITOR';}).map(function(l){return {name:l.name||'',id:l.id||'',reason:l.reason||'',timeIn:l.timein||'',timeOut:l.timeout||'',date:l.date||'',verification:l.identityVerification||(l.identityVerificationMethod==='MANUAL_NO_ID'?'MANUAL ENTRY — NO ID PRESENTED':(l.identityVerificationMethod==='MANUAL_FACE_CAPTURE'?'FACE CAPTURE':(l.idVerified?'VALID ID / OCR':''))),_recordKey:l._reportRecordKey||l.recordKey||'',_filter:l.reason||'',_date:_reportDateMs(l.date),_facility:l.facilityName||'',_facilityId:l.facilityId||''};});
     } else if(type==='CLIENT'){
         model.title='Client Inventory Report'; model.subtitle='Registered students and personnel in the QLog client registry'; model.filename='QLOG_Client_Inventory_Report.xlsx'; model.sheetName='Client Inventory'; model.filterLabel='Client Category'; model.dateFilter=false;
         model.columns=[{key:'no',label:'No.',width:7,align:'center'},{key:'id',label:'ID / LRN / Employee No.',width:22},{key:'name',label:'Complete Name',width:32},{key:'category',label:'Category',width:20},{key:'grade',label:'Grade Level',width:14,align:'center'},{key:'section',label:'Section',width:18}];
@@ -5951,7 +6003,13 @@ function renderReports(){
     var head=document.getElementById('reportHead'); if(head) head.innerHTML=model.columns.map(function(c){return '<th>'+_reportEsc(c.label)+'</th>';}).join('');
     var body=document.getElementById('reportTbl');
     if(body){
-        if(!rows.length) body.innerHTML='<tr><td colspan="'+model.columns.length+'" style="padding:24px;text-align:center;color:#64748b;">No records found for the selected report/filter.</td></tr>';
+        if(!rows.length){
+            var emptyMessage='No records found for the selected report/filter.';
+            if(type==='VISITOR' && _qlogVisitorReportLoading)emptyMessage='Loading Visitor Logs from Central Hub…';
+            else if(type==='VISITOR' && _qlogVisitorReportError)emptyMessage='Central Visitor Reports unavailable: '+_qlogVisitorReportError;
+            else if(type==='VISITOR' && !_qlogVisitorReportRows)emptyMessage='Open Reports while connected to Central Hub to retrieve Visitor Logs.';
+            body.innerHTML='<tr><td colspan="'+model.columns.length+'" style="padding:24px;text-align:center;color:#64748b;">'+_reportEsc(emptyMessage)+'</td></tr>';
+        }
         else body.innerHTML=rows.map(function(r){return '<tr>'+model.columns.map(function(c){var v=r[c.key];if(c.type==='money')v='₱'+(Number(v)||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});return '<td style="'+(c.align==='center'?'text-align:center;':(c.align==='right'||c.type==='money'||c.type==='number'?'text-align:right;':''))+'">'+_reportEsc(v)+'</td>';}).join('')+'</tr>';}).join('');
     }
     var sum=document.getElementById('reportSummary'); if(sum) sum.innerHTML=model.summary.map(function(x){return '<div class="report-summary-card"><div class="k">'+_reportEsc(x.label)+'</div><div class="v">'+_reportEsc(x.value)+'</div></div>';}).join('');
@@ -5994,6 +6052,7 @@ function printReport(){
     renderReports();
     var m=_currentReportModel;
     if(!m){alert('No report is currently selected.');return;}
+    if(m.type==='VISITOR' && (!_qlogVisitorReportRows || _qlogVisitorReportLoading)){alert('Visitor records must be loaded from Central Hub before printing.');return;}
     if(m.type==='VISITOR' && typeof window.printVisitorRecordsFromReports==='function'){ window.printVisitorRecordsFromReports(); return; }
     if(typeof QLogExport!=='undefined'&&QLogExport.printTable){
         QLogExport.printTable({title:m.title,subtitle:m.subtitle,columns:m.columns,rows:m.rows,orientation:'auto',summary:m.summary});
@@ -6006,6 +6065,7 @@ async function exportLogs(){
     renderReports();
     var m=_currentReportModel;
     if(!m){alert('No report is currently selected.');return;}
+    if(m.type==='VISITOR' && (!_qlogVisitorReportRows || _qlogVisitorReportLoading)){alert('Visitor records must be loaded from Central Hub before exporting.');return;}
     if(typeof QLogExport!=='undefined'&&QLogExport.downloadTableXlsx){
         try{await QLogExport.downloadTableXlsx({title:m.title,subtitle:m.subtitle,columns:m.columns,rows:m.rows,orientation:'auto',sheetName:m.sheetName,filename:m.filename});toast('📥 Formatted A4-ready Excel report downloaded.','green');}
         catch(err){console.error('[report-export]',err);toast('❌ Could not generate the formatted Excel report: '+(err.message||err),'red');}
@@ -6015,8 +6075,9 @@ async function exportLogs(){
 }
 
 async function exportAuditTrail() {
-    if(auditLogs.length === 0) { alert('No audit trail records found.'); return; }
-    var rows=auditLogs.slice().reverse().map(function(a,i){return {no:i+1,timestamp:a.timestamp||'',personnel:a.librarian||'',action:a.action||'',details:a.details||''};});
+    var myAuditLogs=(window.QLogScope && QLogScope.scopedRecords)?QLogScope.scopedRecords(auditLogs,'LIBRARY_AUDIT'):[];
+    if(myAuditLogs.length === 0) { alert('No audit trail records found for your assigned facility.'); return; }
+    var rows=myAuditLogs.slice().reverse().map(function(a,i){return {no:i+1,timestamp:a.timestamp||'',personnel:a.librarian||'',action:a.action||'',details:a.details||''};});
     if(typeof QLogExport!=='undefined'&&QLogExport.downloadTableXlsx){
         try{await QLogExport.downloadTableXlsx({title:'Library / System Audit Trail',subtitle:'Chronological record of QLog actions and accountability events',filename:'QLOG_Librarian_Audit_Trail.xlsx',sheetName:'Audit Trail',orientation:'landscape',rows:rows,columns:[{key:'no',label:'No.',width:7,align:'center'},{key:'timestamp',label:'Timestamp',width:22},{key:'personnel',label:'Personnel',width:24},{key:'action',label:'Action',width:28},{key:'details',label:'Details',width:65}]});toast('📥 Formatted audit trail downloaded.','green');}catch(err){toast('❌ Audit export failed: '+(err.message||err),'red');}
         return;
@@ -7104,9 +7165,9 @@ function eqStatusBadge(status){
 function renderEquipRegistry(){
     var q=((document.getElementById('eqRegistrySearch')||{}).value||'').trim().toLowerCase();
     var st=(document.getElementById('eqRegistryStatus')||{}).value||'ALL';
-    var onlyMine=document.getElementById('eqRegistryOnlyMine') ? document.getElementById('eqRegistryOnlyMine').checked : true;
+    var onlyMine=true; // In-charge inventory is always isolated to assigned facility.
     var list=equipment.slice().filter(function(e){
-        if(onlyMine && !sameUnit(e.unit,currentSession.facility)) return false;
+        if(!sameUnit(e.unit,currentSession.facility)) return false;
         if(st!=='ALL' && e.status!==st) return false;
         if(q){
             var hay=[e.id,e.name,e.category,e.serialNo,e.icsNo,e.fundCluster,e.unit,e.condition].join(' ').toLowerCase();
@@ -7140,9 +7201,11 @@ function renderEquipRegistry(){
 
 async function exportEquipRegistry(){
     if(equipment.length===0){ alert('No equipment registered yet.'); return; }
-    var rows=equipment.map(function(e,i){return {no:i+1,inventoryNo:e.id||'',description:e.name||'',quantity:e.quantity||1,unit:e.measureUnit||'unit',unitCost:_eqMoney(e.unitCost),totalCost:e.totalCost!==undefined?_eqMoney(e.totalCost):_eqTotalCost(e),usefulLife:e.estimatedUsefulLife||'',category:e.category||'',serialNo:e.serialNo||'',icsNo:e.icsNo||'',fundCluster:e.fundCluster||'',dateAcquired:e.dateAcquired||'',assignedUnit:e.unit||'',condition:e.condition||'',status:e.status||'',remarks:e.remarks||'',registeredBy:e.addedBy||'',registeredOn:eqFmt(e.addedAt)};});
+    var ownEquipment=equipment.filter(function(e){return sameUnit(e.unit,currentSession.facility);});
+    if(!ownEquipment.length){alert('No equipment registered in your assigned facility.');return;}
+    var rows=ownEquipment.map(function(e,i){return {no:i+1,inventoryNo:e.id||'',description:e.name||'',quantity:e.quantity||1,unit:e.measureUnit||'unit',unitCost:_eqMoney(e.unitCost),totalCost:e.totalCost!==undefined?_eqMoney(e.totalCost):_eqTotalCost(e),usefulLife:e.estimatedUsefulLife||'',category:e.category||'',serialNo:e.serialNo||'',icsNo:e.icsNo||'',fundCluster:e.fundCluster||'',dateAcquired:e.dateAcquired||'',assignedUnit:e.unit||'',condition:e.condition||'',status:e.status||'',remarks:e.remarks||'',registeredBy:e.addedBy||'',registeredOn:eqFmt(e.addedAt)};});
     var cols=[{key:'no',label:'No.',width:7,align:'center'},{key:'inventoryNo',label:'Inventory Item No.',width:20},{key:'description',label:'Description',width:34},{key:'quantity',label:'Qty',width:8,type:'number',align:'center'},{key:'unit',label:'Unit',width:10},{key:'unitCost',label:'Unit Cost',width:14,type:'money'},{key:'totalCost',label:'Total Cost',width:15,type:'money'},{key:'usefulLife',label:'Useful Life',width:13},{key:'category',label:'COA Category',width:34},{key:'serialNo',label:'Serial No.',width:18},{key:'icsNo',label:'ICS No.',width:18},{key:'fundCluster',label:'Fund Cluster',width:13},{key:'dateAcquired',label:'Date Acquired',width:14},{key:'assignedUnit',label:'Assigned Unit',width:24},{key:'condition',label:'Condition',width:16},{key:'status',label:'Status',width:14},{key:'remarks',label:'Remarks',width:34},{key:'registeredBy',label:'Registered By',width:22},{key:'registeredOn',label:'Registered On',width:20}];
-    if(typeof QLogExport!=='undefined'&&QLogExport.downloadTableXlsx) await QLogExport.downloadTableXlsx({title:'ICS-Aligned Equipment Registry',subtitle:'COA semi-expendable equipment inventory across QLog units',rows:rows,columns:cols,orientation:'landscape',sheetName:'ICS Equipment Registry',filename:'ICS_Equipment_Registry.xlsx',facility:'All Registered Units'});
+    if(typeof QLogExport!=='undefined'&&QLogExport.downloadTableXlsx) await QLogExport.downloadTableXlsx({title:'ICS-Aligned Equipment Registry',subtitle:'COA semi-expendable equipment inventory for '+(currentSession.facility||'Current Unit'),rows:rows,columns:cols,orientation:'landscape',sheetName:'ICS Equipment Registry',filename:'ICS_Equipment_Registry.xlsx',facility:(currentSession.facility||'Current Unit')});
 }
 
 /* ---------- ICS registry template + robust bulk import ---------- */
@@ -7298,9 +7361,9 @@ async function exportAllEquipmentQrHTML(){
     // Honours the registry's current visibility rules (unit + status + search).
     var q = ((document.getElementById('eqRegistrySearch') || {}).value || '').trim().toLowerCase();
     var st = (document.getElementById('eqRegistryStatus') || {}).value || 'ALL';
-    var onlyMine = document.getElementById('eqRegistryOnlyMine') ? document.getElementById('eqRegistryOnlyMine').checked : true;
+    var onlyMine = true; // Never export another laboratory's QR labels.
     var list = equipment.slice().filter(function(e){
-        if(onlyMine && !sameUnit(e.unit, currentSession.facility)) return false;
+        if(!sameUnit(e.unit, currentSession.facility)) return false;
         if(st !== 'ALL' && e.status !== st) return false;
         if(q){
             var hay = [e.id, e.name, e.category, e.unit, e.condition].join(' ').toLowerCase();
@@ -7855,7 +7918,7 @@ function openEquipmentHistory(eqId){
     var it = findEquipment(eqId);
     document.getElementById('eqHistoryTitle').textContent = '📜 Equipment History — ' + (it ? it.name + ' (' + it.id + ')' : eqId);
     document.getElementById('eqHistorySearchRow').style.display = 'none';
-    var rows = equipLogs.filter(function(l){ return l.eqId === eqId; });
+    var rows = equipLogs.filter(function(l){ return l.eqId === eqId && sameUnit(l.unit,currentSession.facility); });
     _eqHistorySummary(rows);
     _renderEqHistoryRows(rows);
     document.getElementById('equipHistoryModal').style.display = 'flex';
@@ -7874,7 +7937,7 @@ function loadEquipBorrowerHistory(){
     if(!id){ toast('⚠️ Enter a borrower ID.','yellow'); return; }
     var person = findPerson(id);
     if(!person){ toast('⛔ Borrower is not registered.','red'); document.getElementById('eqHistoryTbl').innerHTML = '<tr><td colspan="10">Unregistered borrower.</td></tr>'; document.getElementById('eqHistorySummary').innerHTML = ''; return; }
-    var rows = equipLogs.filter(function(l){ return String(l.borrowerId).toLowerCase() === id.toLowerCase(); });
+    var rows = equipLogs.filter(function(l){ return sameUnit(l.unit,currentSession.facility) && String(l.borrowerId).toLowerCase() === id.toLowerCase(); });
     document.getElementById('eqHistoryTitle').textContent = '👤 Equipment History — ' + person.name + ' (' + person.id + ')';
     _eqHistorySummary(rows);
     _renderEqHistoryRows(rows);

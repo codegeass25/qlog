@@ -1267,6 +1267,14 @@
   };
   window.qlogCentralStatus=function(){return {serverReady:!!state.serverReady&&navigator.onLine,socketReady:!!(state.socket&&state.socket.connected),authenticated:!!state.token,clientId:state.sourceId,connectedClients:window.QLOG_CONNECTED_CLIENTS||0,profileKey:state.activeProfileKey};};
 
+  async function fetchVisitorReports(){
+    if(!state.token||!navigator.onLine||!state.activeProfileKey)throw new Error('PROFILE_AUTH_REQUIRED');
+    var before=state.activeProfileKey, facility=currentFacility();
+    var response=await api('/api/reports/visitors',{cache:'no-store'});
+    if(state.activeProfileKey!==before || currentFacility()!==facility ||
+       (response.profileKey && response.profileKey!==before))throw new Error('PROFILE_SCOPE_CHANGED');
+    return response;
+  }
   async function exportVisitorRecordsHtml(payload){
     if(!state.token||!navigator.onLine) throw new Error('PROFILE_AUTH_REQUIRED');
     return await apiText('/api/visitors/records/export.html',{method:'POST',body:JSON.stringify(payload||{})});
@@ -1302,6 +1310,7 @@
     discardOfflineItem:discardOfflineItem,
     syncReviewedOffline:syncReviewedOffline,
     exportVisitorRecordsHtml:exportVisitorRecordsHtml,
+    fetchVisitorReports:fetchVisitorReports,
     getOfflineQueue:function(){return loadOfflineQueue(currentScope());}
   };
 
