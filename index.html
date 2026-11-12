@@ -1222,9 +1222,10 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
 
 <div id="visitors" class="tab">
     <div class="card">
-    <h3>Visitor Registration</h3>
+    <h3>Quick Visitor Registration</h3>
+    <p style="margin:4px 0 12px;color:#475569;font-size:13px">School Visitor QR: <strong id="visitorQrDisplay">—</strong></p>
     <div style="margin-bottom: 5px;">
-        <input id="visitorName" placeholder="Full Name (scan/enter first, then correct here if needed)" autocomplete="off" oninput="onVisitorNameInput()" onchange="onVisitorNameInput()" onblur="onVisitorNameInput()">
+        <input id="visitorName" placeholder="Enter visitor's complete name" autocomplete="off" oninput="onVisitorNameInput()" onchange="onVisitorNameInput()" onblur="onVisitorNameInput()">
         <div class="autofill-note" id="visitorNameSource">✓ Captured automatically</div>
     </div>
     <select id="visitorReason" onchange="onVisitorReasonChanged()">
@@ -1238,12 +1239,15 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
     <input type="hidden" id="visitorPhoto">
     <br>
     <div class="visitor-flow-status" id="visitorFlowStatus">Waiting for a visitor QR scan…</div>
+    <div id="visitorCaptureHint" style="margin:8px 0;color:#475569;font-size:12px" aria-live="polite">Position one face in the camera to enable capture.</div>
+    <button type="button" id="visitorCaptureBtn" onclick="captureAndLogVisitor()" disabled style="width:100%;padding:15px;font-weight:750;">📸 Capture Face &amp; Log Visitor</button>
+    <button type="button" onclick="cancelVisitorRegistration()" style="margin-top:8px;background:#64748b;width:100%">Cancel Registration</button>
     <hr>
     <button onclick="exportVisitorHTML()">🌐 Export All Visitor Records (HTML)</button>
     </div>
 </div>
 
-<div id="validIdOverlay">
+<div id="validIdOverlay" aria-hidden="true" style="display:none!important">
   <div class="valid-id-panel">
     <h3 id="validIdTitle">Identity Verification</h3>
     <div class="valid-id-qr">Visitor QR: <b id="validIdQr">—</b></div>
@@ -3755,8 +3759,8 @@ function processScan(code){
         toast('⚠️ Please complete the active facility/profile setup before scanning.','yellow');
         return false;
     }
-    if(isDupBlocked(code)){ dupBlockToast(); return false; }
-
+    // Visitor QR passes have their own server-validated lifecycle; ordinary
+    // student/personnel duplicate cooldown remains unchanged.
     var p = people.find(function(x){ return String(x.id) === code; }) || null;
     var scanMsg = document.getElementById('scanMsg');
     function setResult(message,color){
@@ -3764,38 +3768,20 @@ function processScan(code){
         if(typeof window.qlogLiveScanSuccess==='function') window.qlogLiveScanSuccess();
     }
     if(!p){
-        var openVisitor = logs.slice().reverse().find(function(x){
-            return String(x.id) === code && x.category === 'VISITOR' && !x.timeout &&
-                (!window.QLogScope || QLogScope.recordBelongs(x, 'VISITOR'));
-        });
-        if(openVisitor){
-            var oldTimeout = openVisitor.timeout;
-            var vtTime = new Date().toLocaleTimeString();
-            openVisitor.timeout = vtTime;
-            try {
-                saveAll();
-                markDup(code, Date.now());
-            } catch(err) {
-                openVisitor.timeout = oldTimeout;
-                console.error('[QLog attendance] visitor time-out save failed:', err);
-                toast('❌ Visitor time-out could not be saved. Please retry.','red');
-                return false;
-            }
-            try { renderLogs(); } catch(err) { console.warn('[QLog] render logs:',err); }
-            toast('🔴 ' + openVisitor.name + ' — TIME OUT at ' + vtTime, 'red');
-            try {
-                stopVisitorCamera(); hideVisitorTab();
-                showTab('live', document.querySelector('.nav button:nth-child(1)'));
-            } catch(err) { console.warn('[QLog] restoring Live Monitor:',err); }
-            setResult('🔴 ' + openVisitor.name + ' TIMED OUT', '#dc2626');
+        // Fast and collision-safe Central check-in/check-out: QR is a pass,
+        // NOT a visitor profile identifier. Never use stale local records to
+        // decide whether another person may reuse a school visitor QR.
+        if(typeof handleGuardVisitorQRScan==='function'){
+            handleGuardVisitorQRScan(code,setResult).catch(function(e){
+                console.error('[QLog visitor QR]',e);
+                toast('Visitor QR could not be processed. Central connection required.','red');
+            });
             return true;
         }
-        // Keep the existing identity verification flow for new/unknown visitors.
-        // No duplicate cooldown until visitor TIME-IN is persisted.
-        pendingVisitorQR = code;
-        startVisitorSession(code);
-        return true;
+        toast('Guard visitor upgrade is missing. Check loaded files.','red');
+        return false;
     }
+    if(isDupBlocked(code)){ dupBlockToast(); return false; }
 
     if(!reserveScanAction(code)){ dupBlockToast(); return false; }
     try {

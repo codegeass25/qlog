@@ -21,7 +21,8 @@
   var DELETE_QUEUE_PREFIX = 'qlogCentralDeleteQueue::';
   var PENDING_PREFIX = 'qlogCentralPending::';
   var OFFLINE_QUEUE_PREFIX = 'qlogCentralOfflineQueue::';
-  var VISITOR_FACE_CACHE_KEY = 'qlogCentralVisitorFaceDirectoryV1';
+  var VISITOR_FACE_CACHE_KEY = 'qlogCentralVisitorFaceDirectoryV2::';
+  try{localStorage.removeItem('qlogCentralVisitorFaceDirectoryV1');}catch(_){}
   var BACKFILL_MARK_PREFIX = 'qlogCentralBackfillChecked::';
 
   var SYNC_KEYS = ['logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','configData','dynamicFilterData','borrowPolicies','clearances'];
@@ -1177,10 +1178,18 @@
     }catch(e){ return null; }
   }
 
+  /* Biometric face descriptors are session-only and scoped to the authorized
+     Central profile. Never leak an old office's faces into another profile. */
+  function visitorFaceSessionKey(){return VISITOR_FACE_CACHE_KEY+String(state.activeProfileKey||'');}
   function cachedVisitorFaces(){
-    try{var v=JSON.parse(localStorage.getItem(VISITOR_FACE_CACHE_KEY)||'[]');return Array.isArray(v)?v:[];}catch(e){return [];}
+    if(!state.token||!state.activeProfileKey)return [];
+    try{var v=JSON.parse(sessionStorage.getItem(visitorFaceSessionKey())||'null');
+        return v&&Array.isArray(v.faces)&&Date.now()-v.at<4*60*60*1000?v.faces:[];}catch(e){return [];}
   }
-  function saveVisitorFaces(v){try{if(Array.isArray(v)&&v.length)localStorage.setItem(VISITOR_FACE_CACHE_KEY,JSON.stringify(v));}catch(e){}}
+  function saveVisitorFaces(v){
+    if(!state.token||!state.activeProfileKey)return;
+    try{sessionStorage.setItem(visitorFaceSessionKey(),JSON.stringify({at:Date.now(),faces:Array.isArray(v)?v:[]}));}catch(e){}
+  }
   async function lookupVisitorFaces(){
     var cached=cachedVisitorFaces();
     if(!navigator.onLine)return cached;
@@ -1192,14 +1201,27 @@
     try{
       var resp=await api('/api/visitors/faces');
       var faces=(resp&&Array.isArray(resp.visitors))?resp.visitors:[];
-      if(faces.length)saveVisitorFaces(faces);
-      return faces.length?faces:cached;
+      saveVisitorFaces(faces);
+      return faces;
     }catch(e){
       if((e.status===401||e.status===403) && state.token){
-        try{var retry=await api('/api/visitors/faces');var again=(retry&&Array.isArray(retry.visitors))?retry.visitors:[];if(again.length)saveVisitorFaces(again);return again.length?again:cached;}catch(_e){}
+        try{var retry=await api('/api/visitors/faces');var again=(retry&&Array.isArray(retry.visitors))?retry.visitors:[];saveVisitorFaces(again);return again;}catch(_e){}
       }
       return cached;
     }
+  }
+
+  async function visitorPassStatus(qr){
+    if(!state.token||!navigator.onLine)throw new Error('CENTRAL_VISITOR_CONNECTION_REQUIRED');
+    return await api('/api/visitors/pass-status?qr='+encodeURIComponent(String(qr||'')),{cache:'no-store'});
+  }
+  async function visitorCheckIn(payload){
+    if(!state.token||!navigator.onLine)throw new Error('CENTRAL_VISITOR_CONNECTION_REQUIRED');
+    return await api('/api/visitors/check-in',{method:'POST',body:JSON.stringify(payload)});
+  }
+  async function visitorCheckOut(qr,visitId){
+    if(!state.token||!navigator.onLine)throw new Error('CENTRAL_VISITOR_CONNECTION_REQUIRED');
+    return await api('/api/visitors/check-out',{method:'POST',body:JSON.stringify({qr:qr,visitId:visitId})});
   }
 
   async function checkInventoryBatch(dataset,items){
@@ -1255,6 +1277,9 @@
     checkInventoryBatch:checkInventoryBatch,
     lookupVisitorByQR:lookupVisitorByQR,
     lookupVisitorFaces:lookupVisitorFaces,
+    visitorPassStatus:visitorPassStatus,
+    visitorCheckIn:visitorCheckIn,
+    visitorCheckOut:visitorCheckOut,
     profileChanged:profileChanged,
     showOfflineReview:showOfflineReview,
     closeOfflineReview:closeOfflineReview,

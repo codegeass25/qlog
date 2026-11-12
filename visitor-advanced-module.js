@@ -218,241 +218,115 @@ async function _loadCentralVisitorFaces(force){
     return _centralFaceDirectoryPromise;
 }
 
+/* Guard-friendly camera validation and cross-office face lookup.
+   A QR is a reusable pass, NEVER the long-term face identity. */
+var _visitorCameraGeneration = 0;
+function _updateVisitorCaptureButton(){
+    var b=document.getElementById('visitorCaptureBtn');if(!b)return;
+    var st=visitorRegistrationState,video=document.getElementById('visitorCamera');
+    var fresh=st.faceDetected && st.faceDescriptor && st.faceDescriptor.length===128 &&
+        st.faceStableFrames>=2 && Date.now()-(st.faceSeenAt||0)<1400;
+    var ready=!!(st.qr && String(st.name||'').trim().length>=4 &&
+        String(st.reason||'').trim().length>=2 && fresh && faceApiReady &&
+        visitorStream && video && video.videoWidth && !video.paused && !st.logged && !st.captureBusy);
+    b.disabled=!ready;
+    b.textContent=st.captureBusy?'⏳ Saving Visitor…':'📸 Capture Face & Log Visitor';
+    var status=document.getElementById('visitorCaptureHint');
+    if(status)status.textContent=st.captureBusy?'Saving to Central Hub…':
+        !st.faceDetected?'Place one face in the camera to enable capture.':
+        st.faceStableFrames<2?'Hold the face steady for detection.':
+        !st.name||!st.reason?'Enter Complete Name and select Reason for Visit.':
+        ready?'✓ Face ready — press Capture Face & Log Visitor.':'Checking camera…';
+}
+function _visitorClearAutoMatch(st){
+    if(st.faceMatchedName && !st.nameEdited && String(st.name||'').trim().toLowerCase()===String(st.faceMatchedName||'').trim().toLowerCase())
+        setVisitorName('','','clear');
+    st.faceRecognized=false;st.faceMatchedIdentityId='';st.faceMatchedName='';
+    st.centralProfile=null;
+    _stableMatchCounter=0;_stableMatchKey='';_recognizedFaceKey='';
+}
 async function _faceRecognitionTick(){
-    if (!faceApiReady) return;
-    var video = document.getElementById('visitorCamera');
-    var overlay  = document.getElementById('faceOverlay');
-    if (!video || !video.videoWidth) return;
-
-    var st = visitorRegistrationState;
-    if (st.logged) return;
-    if (st.centralLookupPending && !centralFaceDirectory.length){
-        if (window.QLogCentral && navigator.onLine && !_centralFaceDirectoryPromise) _loadCentralVisitorFaces(false).catch(function(){});
-        _setFaceHud('detecting','Checking Central visitor faces…',20);
-        return;
-    }
-    if (!centralFaceDirectory.length && window.QLogCentral && navigator.onLine && !_centralFaceDirectoryPromise){
+    if(!faceApiReady)return;
+    var video=document.getElementById('visitorCamera'),overlay=document.getElementById('faceOverlay');
+    if(!video||!video.videoWidth||video.paused)return;
+    var st=visitorRegistrationState;if(st.logged||st.captureBusy)return;
+    if(!centralFaceDirectory.length && window.QLogCentral && navigator.onLine && !_centralFaceDirectoryPromise)
         _loadCentralVisitorFaces(false).catch(function(){});
-    }
-
     var dets;
     try{
-        var inputSize=_isMobileDevice?224:320;
-        var threshold=_isMobileDevice?0.42:0.50;
-        dets = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({inputSize:inputSize, scoreThreshold:threshold}))
-                            .withFaceLandmarks().withFaceDescriptors();
+        dets=await faceapi.detectAllFaces(video,new faceapi.TinyFaceDetectorOptions({inputSize:_isMobileDevice?224:320,scoreThreshold:_isMobileDevice?0.42:0.50}))
+           .withFaceLandmarks().withFaceDescriptors();
         _faceDetectErrors=0;
     }catch(e){
-        _faceDetectErrors++;
-        console.warn('[face-api] detection failed',e);
-        if(_faceDetectErrors===2){
-            try{
-                var tf=faceapi.tf;
-                if(tf&&tf.setBackend&&tf.getBackend&&tf.getBackend()!=='cpu'){
-                    await tf.setBackend('cpu'); if(tf.ready)await tf.ready();
-                    _setFaceHud('detecting','Mobile compatibility mode enabled. Look at the camera.',35);
-                }
-            }catch(_be){}
-        }
-        if(_faceDetectErrors>=4)_setFaceHud('error','Face engine is retrying. Keep this page active and camera visible.',0);
+        _faceDetectErrors++;st.faceDetected=false;st.faceStableFrames=0;st.faceDescriptor=null;
+        _updateVisitorCaptureButton();
+        _setFaceHud('error','Face detection temporarily unavailable. Retrying…',0);
+        if(_faceDetectErrors===2){try{if(faceapi.tf&&faceapi.tf.setBackend)await faceapi.tf.setBackend('cpu');}catch(_) {}}
         return;
     }
-    dets = dets || [];
-
-    // Draw overlay
-    if (overlay){
-        try{
-            var ctx = overlay.getContext('2d');
-            overlay.width = video.videoWidth;
-            overlay.height = video.videoHeight;
-            ctx.clearRect(0,0,overlay.width, overlay.height);
-            ctx.lineWidth = 3;
-            for (var b=0;b<dets.length;b++){
-                var box = dets[b].detection.box;
-                ctx.strokeStyle = (dets.length === 1) ? '#22d3ee' : '#f59e0b';
-                ctx.strokeRect(box.x, box.y, box.width, box.height);
+    if(st!==visitorRegistrationState)return; // ignore stale tick after QR/tab switch
+    dets=dets||[];
+    if(overlay){try{
+        var ctx=overlay.getContext('2d');overlay.width=video.videoWidth;overlay.height=video.videoHeight;
+        ctx.clearRect(0,0,overlay.width,overlay.height);
+        ctx.lineWidth=3;ctx.strokeStyle=dets.length===1?'#22d3ee':'#f59e0b';
+        dets.forEach(function(d){var b=d.detection.box;ctx.strokeRect(b.x,b.y,b.width,b.height);});
+    }catch(_){}}
+    if(dets.length!==1){
+        st.faceDetected=false;st.faceDescriptor=null;st.faceStableFrames=0;st.faceSeenAt=0;
+        _visitorClearAutoMatch(st);
+        _setFaceHud(dets.length>1?'error':'detecting',dets.length>1?'Only ONE visitor face may appear.':'Waiting for visitor face…',0);
+        _updateVisitorCaptureButton();return;
+    }
+    var d=dets[0];
+    st.faceDetected=true;st.faceSeenAt=Date.now();st.faceStableFrames=(st.faceStableFrames||0)+1;st.faceDescriptor=d.descriptor;
+    var entries=centralFaceDirectory.length?centralFaceDirectory:faceDescriptorCache;
+    var candidates=[];
+    for(var i=0;i<entries.length;i++){
+        var item=entries[i];if(!item||!item.descriptor||item.descriptor.length!==128)continue;
+        candidates.push({dist:_euclidean(d.descriptor,item.descriptor),item:item,id:String(item.id||item.visitorId||'')});
+    }
+    candidates.sort(function(a,b){return a.dist-b.dist;});
+    var best=candidates[0]||null;
+    if(best){
+        // Legacy QR-keyed face records may coexist with a newly migrated
+        // VISP profile. Prefer the permanent profile for the SAME person.
+        var nameKey=String(best.item.name||'').trim().toLowerCase();
+        var permanent=candidates.find(function(x){return /^VISP-/i.test(x.id)&&
+            String(x.item.name||'').trim().toLowerCase()===nameKey&&x.dist-best.dist<=0.06;});
+        if(permanent)best=permanent;
+    }
+    var second=Infinity;
+    if(best)for(var q=0;q<candidates.length;q++){
+        var other=candidates[q];
+        if(other.id===best.id)continue;
+        // One person can have multiple legacy profiles with the same name;
+        // different-name near matches, however, must require operator review.
+        if(String(other.item.name||'').trim().toLowerCase()===String(best.item.name||'').trim().toLowerCase())continue;
+        second=Math.min(second,other.dist);
+    }
+    var matched=best&&best.dist<=FACE_MATCH_THRESHOLD && (second===Infinity||second-best.dist>=0.04);
+    if(matched){
+        var key=best.id||String(best.item.name||'');
+        if(_stableMatchKey===key)_stableMatchCounter++;else{_stableMatchKey=key;_stableMatchCounter=1;}
+        if(_stableMatchCounter>=FACE_MATCH_STABLE_FRAMES){
+            if(_recognizedFaceKey!==key){
+                if(st.faceRecognized)_visitorClearAutoMatch(st);
+                st.faceRecognized=true;st.faceMatchedIdentityId=best.id;st.faceMatchedName=String(best.item.name||'');
+                st.centralProfile={id:best.id,name:best.item.name,nameSource:best.item.nameSource||'MANUAL'};
+                st.nameSource=best.item.nameSource||'MANUAL_FACE_CAPTURE';
+                st.nameEdited=false;st.mode='RETURNING';_recognizedFaceKey=key;
+                setVisitorName(best.item.name,'Central face recognition','face');
+                setVisitorFlowStatus('✓ Returning visitor recognized. Confirm the name, choose Reason for Visit, then capture.','ok');
             }
-        }catch(e){}
+            _setFaceHud('matched','✓ Recognized: '+best.item.name,90);
+        }else _setFaceHud('detecting','Matching registered face…',60);
+    }else{
+        if(st.faceRecognized)_visitorClearAutoMatch(st);
+        _stableMatchCounter=0;_stableMatchKey='';
+        _setFaceHud('detecting',best&&best.dist<=FACE_MATCH_THRESHOLD?'Possible duplicate profiles — confirm identity manually.':'One face detected. Enter visitor details.',80);
     }
-
-    function revokeStaleFaceMatch(message, force){
-        _faceMismatchStreak++;
-        _stableMatchCounter = 0;
-        _stableMatchKey = '';
-        if ((!force && _faceMismatchStreak < 2) || !st.faceRecognized) return;
-        st.faceRecognized = false;
-        st.faceRegistered = false;
-        st.mode = 'NEW';
-        st.faceImage = '';
-        st.requiresCentralFaceMatch = !!(st.centralProfile && Array.isArray(st.centralProfile.faceDescriptor) && st.centralProfile.faceDescriptor.length >= 64);
-        if (st.faceMatchedName && !st.nameEdited && _normalizeNameKey(st.name) === _normalizeNameKey(st.faceMatchedName)) {
-            setVisitorName('', '', 'clear');
-        }
-        if (st.faceIdentityReused === true) {
-            st.idVerified = false;
-            st.identityVerificationMethod = null;
-            st.nameSource = null;
-            st.faceIdentityReused = false;
-        }
-        st.faceMatchedName = '';
-        st.faceMatchedIdentityId = '';
-        _recognizedFaceKey = '';
-        _lastFaceMatchName = null;
-        _setFaceHud('detecting', message || 'Face changed. Re-identifying visitor…', 20);
-    }
-
-    // MULTIPLE FACE PROTECTION
-    if (dets.length > 1){
-        st.faceDetected = false;
-        st.faceDescriptor = null;
-        revokeStaleFaceMatch('Multiple faces detected. Previous match cleared.');
-        _setFaceHud('error', '\u26a0 Multiple faces detected \u2014 only the visitor should be visible.', 0);
-        setVisitorFlowStatus('\u26a0 <b>MULTIPLE FACES DETECTED</b><br>Please make sure only the visitor is visible in the camera.', 'warn');
-        return;
-    }
-
-    if (dets.length === 0){
-        st.faceDetected = false;
-        st.faceDescriptor = null;
-        revokeStaleFaceMatch('Face left the camera. Previous match cleared.');
-        _setFaceHud('detecting', 'Searching for a face\u2026', 20);
-        if (st.reason && !st.logged){
-            setVisitorFlowStatus('\u26a0 <b>FACE REQUIRED</b><br>Please look at the camera. The visitor will be logged automatically once the face is detected.', 'warn');
-        }
-        return;
-    }
-
-    var det = dets[0];
-    st.faceDetected = true;
-    st.faceDescriptor = det.descriptor;
-    if (!st.faceImage) { try { st.faceImage = _captureVisitorPhoto(); } catch(e){} }
-
-    // Match against registered visitors
-    var best = {dist: Infinity, name: null, entry: null};
-    var second = Infinity;
-    for (var i=0;i<faceDescriptorCache.length;i++){
-        var d = _euclidean(det.descriptor, faceDescriptorCache[i].descriptor);
-        if (d < best.dist){ second = best.dist; best = {dist:d, name: faceDescriptorCache[i].name, entry: faceDescriptorCache[i]}; }
-        else if (d < second){ second = d; }
-    }
-
-    // Cross-office identity is FACE + registered NAME from the Centralized DB.
-    // QR is NOT used as the identity key and must never be required to select
-    // the Central candidate. Local-office faces cannot veto a valid Central match.
-    var centralAuthoritativeMatch = false;
-    var centralBest = {dist:Infinity, entry:null, name:null};
-    if(_visitorCentralProfile && Array.isArray(_visitorCentralProfile.faceDescriptor) && _visitorCentralProfile.faceDescriptor.length>=64){
-        try{
-            var directEntry={id:_visitorCentralProfile.id||'',name:_visitorCentralProfile.name||'',nameSource:_visitorCentralProfile.nameSource||'MANUAL',descriptor:Float32Array.from(_visitorCentralProfile.faceDescriptor),profileKey:_visitorCentralProfile.profileKey||''};
-            centralBest={dist:_euclidean(det.descriptor,directEntry.descriptor),entry:directEntry,name:directEntry.name};
-        }catch(e){}
-    }
-    for (var c=0;c<centralFaceDirectory.length;c++){
-        var cd = _euclidean(det.descriptor, centralFaceDirectory[c].descriptor);
-        if (cd < centralBest.dist) centralBest = {dist:cd, entry:centralFaceDirectory[c], name:centralFaceDirectory[c].name};
-    }
-    var CENTRAL_FACE_THRESHOLD = (_visitorCentralProfile && centralBest.entry && String(centralBest.entry.id||'')===String(_visitorCentralProfile.id||'')) ? 0.50 : 0.50;
-    if (centralBest.entry && centralBest.dist <= CENTRAL_FACE_THRESHOLD){
-        best = {dist:centralBest.dist, name:centralBest.name, entry:centralBest.entry};
-        second = Infinity;
-        centralAuthoritativeMatch = true;
-        visitorRegistrationState.centralProfile = {
-            id:centralBest.entry.id||'',
-            name:centralBest.entry.name,
-            nameSource:centralBest.entry.nameSource||'MANUAL',
-            faceDescriptor:Array.from(centralBest.entry.descriptor),
-            profileKey:centralBest.entry.profileKey||''
-        };
-    }
-
-    var confidence = Math.max(0, Math.min(1, 1 - (best.dist / 0.9)));
-    var margin = (second === Infinity) ? 0.1 : (second - best.dist);
-    var matched = best.name && best.dist <= (centralAuthoritativeMatch ? CENTRAL_FACE_THRESHOLD : FACE_MATCH_THRESHOLD) && (centralAuthoritativeMatch || margin >= 0.04);
-
-    if (matched){
-        var candidateKey = String((best.entry && (best.entry.id || best.entry.visitorId || best.entry.profileKey)) || best.name || '').toLowerCase();
-        if (st.faceRecognized && _recognizedFaceKey && _recognizedFaceKey !== candidateKey){
-            revokeStaleFaceMatch('A different face is now in view. Previous visitor cleared.', true);
-        }
-        if (_stableMatchKey !== candidateKey){
-            _stableMatchKey = candidateKey;
-            _stableMatchCounter = 1;
-        } else {
-            _stableMatchCounter++;
-        }
-        _faceMismatchStreak = 0;
-        _setFaceHud('detecting', 'Matching: ' + best.name + ' (' + (confidence*100).toFixed(0) + '%)', confidence*100);
-        if (_stableMatchCounter >= FACE_MATCH_STABLE_FRAMES){
-            if (!st.faceRecognized || _recognizedFaceKey !== candidateKey){
-                if (st.faceRecognized && _recognizedFaceKey && _recognizedFaceKey !== candidateKey){
-                    st.faceRecognized = false;
-                    st.faceRegistered = false;
-                    if (st.faceMatchedName && !st.nameEdited && _normalizeNameKey(st.name) === _normalizeNameKey(st.faceMatchedName)) setVisitorName('', '', 'clear');
-                }
-                st.faceRecognized = true;
-                st.mode = 'RETURNING';
-                st.faceRegistered = true;
-                st.requiresCentralFaceMatch = false;
-                st.faceMatchedName = best.name || '';
-                st.faceMatchedIdentityId = String((best.entry && (best.entry.id || best.entry.visitorId)) || '');
-                _recognizedFaceKey = candidateKey;
-                _lastFaceMatchName = best.name;
-                _setFaceHud('matched', '\u2713 ' + best.name + ' (' + (confidence*100).toFixed(0) + '%)', confidence*100);
-                toast('\U0001f916 Visitor recognized: ' + best.name, 'green');
-                if (!st.idVerified && !st.manualNoId){
-                    var prevSource = (best.entry && best.entry.nameSource) || getVisitorNameSource(best.name);
-                    if (prevSource === 'ID_OCR'){
-                        // Name was originally established through a successful ID OCR:
-                        // reuse it. No ID, no OCR. Preserve the verified status on
-                        // this new visit so Central never gets a downgraded record.
-                        st.idVerified = true;
-                        st.centralIdVerified = true;
-                        st.identityVerificationMethod = null;
-                        st.requiresIdRecheck = false;
-                        st.nameSource = 'ID_OCR';
-                        st.faceIdentityReused = true;
-                        st.faceImage = _captureVisitorPhoto();
-                        setVisitorName(best.name, 'Face recognition (ID-verified profile)', 'face');
-                        setVisitorFlowStatus('\u2713 Visitor identified: <b>' + best.name + '</b> (ID-verified profile). Select a <b>Reason for Visit</b> to log automatically.', 'ok');
-                        try { closeValidIdScreen(); } catch(e){}
-                    } else {
-                        // Name was originally entered manually -> require an ID this time.
-                        st.nameSource = 'MANUAL';
-                        _lastFaceMatchName = best.name;
-                        _requireIdRecheckForReturningVisitor();
-                    }
-                } else {
-                    setVisitorFlowStatus('\u2713 Visitor identified: <b>' + (st.name || best.name) + '</b>. Select a <b>Reason for Visit</b> to log automatically.', 'ok');
-                }
-            } else {
-                _setFaceHud('matched', '\u2713 ' + best.name, confidence*100);
-            }
-        }
-    } else {
-        _stableMatchCounter = 0;
-        _stableMatchKey = '';
-        revokeStaleFaceMatch('Face does not match the previous visitor. Re-identifying…');
-        if(st.requiresCentralFaceMatch && st.centralProfile){
-            _setFaceHud('error','Face does not match the registered Central visitor yet.',0);
-            setVisitorFlowStatus('Registered visitor <b>'+String(st.centralProfile.name||'')+'</b> was found, but the live face has not matched. Keep the face centered and well lit. The registered Valid ID will not be requested again.','warn');
-            return;
-        }
-        if (st.idVerified || st.manualNoId){
-            _setFaceHud('detecting', 'Face captured for registration \u2014 ' + (st.name || 'new visitor'), 70);
-            setVisitorFlowStatus('\u2713 Face captured for <b>' + (st.name || 'visitor') + '</b>. Select a <b>Reason for Visit</b> to log automatically.', 'ok');
-        } else {
-            _unknownFaceStreak++;
-            _setFaceHud('detecting', 'Unrecognized visitor \u2014 identity verification required', 40);
-            if (_unknownFaceStreak >= 3 && !st.idVerified && !st.manualNoId && !_idScanActive &&
-                !document.getElementById('validIdOverlay').classList.contains('open')){
-                setVisitorFlowStatus('Visitor not recognized. Choose <b>PRESENT VALID ID</b> or <b>NO VALID ID AVAILABLE</b>.', 'warn');
-                openIdentityVerificationScreen(st.qr);
-            }
-        }
-    }
-
-    // Auto-log as soon as every condition is satisfied (waits automatically otherwise).
-    _tryAutoLogVisitor();
+    _updateVisitorCaptureButton();
 }
 
 /* Returns 'ID_OCR' | 'MANUAL' | null for an already-registered visitor name.
@@ -505,41 +379,65 @@ function _requireIdRecheckForReturningVisitor(){
 
 /* Starts a full visitor session for a scanned unknown QR. */
 function startVisitorSession(code){
+    if(!code)return;
     resetVisitorRegistrationState();
-    setVisitorName('', '', 'clear');
-    var _vr=document.getElementById('visitorReason'); if(_vr) _vr.value='';
-    var _vo=document.getElementById('visitorReasonOther'); if(_vo){_vo.value='';_vo.style.display='none';}
-    var _vs=document.getElementById('visitorNameSource'); if(_vs){_vs.style.display='none';_vs.textContent='';}
-    visitorRegistrationState.qr=code||'';
-    visitorRegistrationState.centralLookupPending=!!(window.QLogCentral && navigator.onLine);
+    visitorRegistrationState.qr=String(code).trim();
     visitorRegistrationState.mode='NEW';
-    setVisitorFlowStatus('Checking Central visitor registration and face directory…','');
-    showVisitorTab(); showTab('visitors',document.querySelector('#visitorTabBtn'));
-    Promise.allSettled([_loadCentralVisitorProfile(code),_loadCentralVisitorFaces(false)]).then(function(){
-        visitorRegistrationState.centralLookupPending=false;
-        if(visitorRegistrationState.logged) return;
-        if(visitorRegistrationState.centralProfile) return;
-        if(!visitorRegistrationState.faceRecognized){
-            setVisitorFlowStatus(centralFaceDirectory.length ? 'Central visitor directory loaded. Please look at the camera for face recognition.' : 'No registered Central profile was found yet. Please look at the camera — identity verification will start if needed.','');
-        }
-    });
+    var n=document.getElementById('visitorName');if(n)n.value='';
+    var r=document.getElementById('visitorReason');if(r)r.value='';
+    var o=document.getElementById('visitorReasonOther');if(o){o.value='';o.style.display='none';}
+    var source=document.getElementById('visitorNameSource');if(source)source.style.display='none';
+    var pass=document.getElementById('visitorQrDisplay');if(pass)pass.textContent=visitorRegistrationState.qr;
+    try{closeValidIdScreen();}catch(_){}
+    setVisitorFlowStatus('Enter Complete Name and Reason for Visit. Position exactly one face for manual capture.','');
+    showVisitorTab();showTab('visitors',document.querySelector('#visitorTabBtn'));
+    _updateVisitorCaptureButton();
+    _loadCentralVisitorFaces(false).catch(function(){});
     startVisitorCamera();
-    _visitorIdentifyDeadline=Date.now()+15000;
-    setTimeout(function(){
-        var st=visitorRegistrationState;
-        if(st.qr!==code || st.logged) return;
-        if(st.requiresCentralFaceMatch && st.centralProfile){
-            setVisitorFlowStatus('Registered visitor found, but face verification is still required. Keep the face centered and well lit.','warn');
-            return;
-        }
-        if(!st.faceRecognized && !st.idVerified && !st.manualNoId && !document.getElementById('validIdOverlay').classList.contains('open')){
-            setVisitorFlowStatus('Visitor not recognized. Choose <b>PRESENT VALID ID</b> or <b>NO VALID ID AVAILABLE</b>.','warn');
-            openIdentityVerificationScreen(code);
-        }
-    }, 15000);
-    toast('Visitor QR scanned — starting verification','yellow');
 }
 
+/* The school QR pass can be checked out only by the Central Hub, ensuring
+   that two guard devices cannot hand it to two people simultaneously. */
+var _guardVisitorScanBusy=false,_guardVisitorQrCooldown={};
+async function handleGuardVisitorQRScan(code,report){
+    if(_guardVisitorScanBusy){toast('Visitor QR check is already in progress.','yellow');return false;}
+    if(Date.now()<(_guardVisitorQrCooldown[code]||0)){
+        toast('QR recently processed. Keep the card away briefly before scanning again.','yellow');return false;
+    }
+    if(!window.QLogCentral||typeof QLogCentral.visitorPassStatus!=='function'){
+        toast('Central Guard visitor update not installed. Check deployment.','red');return false;
+    }
+    _guardVisitorScanBusy=true;
+    try{
+        var state=await QLogCentral.visitorPassStatus(code);
+        if(!state.active){
+            // Refuse to start another registration if the Guard already has an
+            // incomplete visitor registration form on screen.
+            if(visitorRegistrationState.qr && !visitorRegistrationState.logged &&
+               document.getElementById('visitors').classList.contains('active')){
+                toast('Finish or cancel the current visitor registration first.','yellow');return false;
+            }
+            startVisitorSession(code);return true;
+        }
+        var active=state.visit||{};
+        var result=await QLogCentral.visitorCheckOut(code,active.visitId);
+        var rec=result.record||{};
+        var index=logs.findIndex(function(x){return x.visitorVisitId===active.visitId||x._syncId===rec._syncId;});
+        if(index>=0)logs[index]=Object.assign({},logs[index],rec);
+        else logs.push(rec);
+        try{saveAll();}catch(e){console.warn('[visitor] local time-out cache save failed',e);}
+        _guardVisitorQrCooldown[code]=Date.now()+2500;
+        try{renderLogs();}catch(_){}
+        toast('🔴 '+String(rec.name||active.name||'Visitor')+' — TIME OUT at '+String(rec.timeout||''),'red');
+        if(typeof report==='function')report('🔴 '+String(rec.name||'Visitor')+' TIMED OUT','#dc2626');
+        if(window.QLogCentral&&QLogCentral.syncDatasetsNow)QLogCentral.syncDatasetsNow(['logs']).catch(function(){});
+        return true;
+    }catch(e){
+        var msg=e&&e.message||'Central unavailable';
+        if(msg==='QR_NOT_ACTIVE')msg='QR status changed on another guard device. Scan again.';
+        toast('❌ Visitor QR: '+msg,'red');return false;
+    }finally{_guardVisitorScanBusy=false;}
+}
 
 window.addEventListener('qlog:central-ready', function(){
     _loadCentralVisitorFaces(true).catch(function(e){ console.warn('[visitor] Central face preload after auth failed', e); });
@@ -575,6 +473,7 @@ async function startVisitorCamera(){
         toast('Camera not supported on this device/browser.', 'red'); return;
     }
     stopVisitorCamera();
+    var cameraGeneration=++_visitorCameraGeneration;
     var wrap = document.getElementById('visitorVideoWrap');
     var hud  = document.getElementById('faceHud');
     if (wrap) wrap.style.display = 'inline-block';
@@ -582,18 +481,28 @@ async function startVisitorCamera(){
     var vc = document.getElementById('visitorCamera');
     try{
         var constraints={audio:false,video:{facingMode:{ideal:'user'},width:{ideal:_isMobileDevice?480:640},height:{ideal:_isMobileDevice?640:480},frameRate:{ideal:24,max:30}}};
-        try{visitorStream=await navigator.mediaDevices.getUserMedia(constraints);}
+        var openedStream;
+        try{openedStream=await navigator.mediaDevices.getUserMedia(constraints);}
         catch(firstErr){
-            try{visitorStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:'user'}});}
-            catch(secondErr){visitorStream=await navigator.mediaDevices.getUserMedia({audio:false,video:true});}
+            try{openedStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:'user'}});}
+            catch(secondErr){openedStream=await navigator.mediaDevices.getUserMedia({audio:false,video:true});}
         }
+        if(cameraGeneration!==_visitorCameraGeneration){
+            if(openedStream)openedStream.getTracks().forEach(function(t){t.stop();});
+            return;
+        }
+        visitorStream=openedStream;
         vc.setAttribute('playsinline','true');vc.setAttribute('webkit-playsinline','true');vc.muted=true;vc.autoplay=true;
         vc.srcObject = visitorStream; vc.style.display = 'block';
         try{await vc.play();}catch(playErr){console.warn('[visitor] video play retry',playErr);}
         var ready=await _waitForVideoReady(vc,4500);
         if(!ready || !vc.videoWidth)throw new Error('Camera opened but Safari/browser did not provide a playable video frame.');
         await new Promise(function(r){(window.requestAnimationFrame||function(cb){setTimeout(cb,32);})(function(){r();});});
-        var modelOk=await _loadFaceApiModels();
+        if(faceApiLoading){
+            for(var tries=0;tries<90 && faceApiLoading;tries++)await new Promise(function(r){setTimeout(r,150);});
+        }
+        var modelOk=faceApiReady || await _loadFaceApiModels();
+        if(cameraGeneration!==_visitorCameraGeneration)return;
         if (modelOk && faceApiReady){
             await _rebuildFaceDescriptorCache();
             _loadCentralVisitorFaces(true).catch(function(e){ console.warn('[visitor] Central face preload failed', e); });
@@ -610,6 +519,7 @@ async function startVisitorCamera(){
 
 
 function stopVisitorCamera(){
+    _visitorCameraGeneration++;
     if(visitorStream){ visitorStream.getTracks().forEach(function(t){ t.stop(); }); }
     visitorStream = null;
     var vc = document.getElementById('visitorCamera');
@@ -619,7 +529,7 @@ function stopVisitorCamera(){
     if(faceRecogInterval){ clearTimeout(faceRecogInterval); faceRecogInterval = null; }
     _faceLoopRunning=false;
     _stableMatchCounter = 0; _stableMatchKey = ''; _recognizedFaceKey = ''; _faceMismatchStreak = 0; _lastFaceMatchName = null;
-    try { visitorRegistrationState.faceDetected = false; visitorRegistrationState.faceDescriptor = null; } catch(e){}
+    try { visitorRegistrationState.faceDetected = false; visitorRegistrationState.faceDescriptor = null;visitorRegistrationState.faceStableFrames=0;visitorRegistrationState.faceSeenAt=0;_updateVisitorCaptureButton(); } catch(e){}
 }
 
 var visitorRegistrationState = {
@@ -675,7 +585,7 @@ function resetVisitorRegistrationState(){
         idType: '', dob: '', faceDetected: false, faceRegistered: false, faceRecognized: false,
         faceDescriptor: null, faceImage: '', reason: '', nameSource: null, nameEdited: false, nameEditedAt: '', requiresIdRecheck: false,
         autoLogInProgress: false, logged: false, centralProfile: null, centralLookupPending: false,
-        centralIdVerified: false, requiresCentralFaceMatch: false, faceMatchedName: '', faceMatchedIdentityId: '', faceIdentityReused: false
+        centralIdVerified: false, requiresCentralFaceMatch: false, faceMatchedName: '', faceMatchedIdentityId: '', faceIdentityReused: false, faceStableFrames:0,faceSeenAt:0,captureBusy:false,commitRequestId:''
     };
     _resetIdVerificationRuntime();
     visitorAutoLogInProgress = false;
@@ -718,7 +628,7 @@ function setVisitorName(name, source, trust){
         console.warn('[visitor] refused untrusted name write');
         return;
     }
-    if(name && trust === 'manual' && st.identityVerificationMethod !== 'MANUAL_NO_ID'){
+    if(name && trust === 'manual' && st.identityVerificationMethod !== 'MANUAL_NO_ID' && st.identityVerificationMethod !== 'MANUAL_FACE_CAPTURE'){
         console.warn('[visitor] manual name refused: MANUAL_NO_ID mode is not active');
         return;
     }
@@ -757,7 +667,7 @@ function _syncVisitorNameEditability(){
     f.removeAttribute('disabled');
     f.disabled = false;
     if(visitorRegistrationState.identityVerificationMethod === 'MANUAL_NO_ID'){
-        f.placeholder = 'Full Name (manual entry \u2014 no valid ID presented)';
+        f.placeholder = 'Enter visitor complete name';
     } else {
         f.placeholder = 'Full Name (auto-filled \u2014 correct here if needed)';
     }
@@ -778,14 +688,18 @@ function onVisitorNameInput(){
         st.idVerified = false;
         st.idVerificationEvidence = null;
     } else if(changed){
+        if(st.faceMatchedIdentityId && next.toLowerCase()!==String(st.faceMatchedName||'').toLowerCase()){
+            st.faceMatchedIdentityId='';st.faceRecognized=false;st.mode='NEW';
+        }
         st.nameEdited = true;
         st.nameEditedAt = new Date().toISOString();
         var note = document.getElementById('visitorNameSource');
         if(note && next){
             note.style.display = 'block';
-            note.textContent = '\u270e Auto-filled name corrected by operator';
+            note.textContent = '\u270e Name corrected by operator';
         }
     }
+    _updateVisitorCaptureButton();
 }
 
 /* ====================== OFFLINE OCR (PP-OCR / PaddleOCR) ======================
@@ -2294,7 +2208,7 @@ function onVisitorReasonChanged(){
     var reason = sel.value.trim();
     if(reason === 'Others') reason = other ? other.value.trim() : '';
     visitorRegistrationState.reason = reason;
-    if(reason) _tryAutoLogVisitor();
+    _updateVisitorCaptureButton();
 }
 
 /* ================= FINAL IDENTITY VALIDATION BEFORE LOGGING =================
@@ -2323,98 +2237,56 @@ function _validateVisitorIdentityForLogging(st){
     return { ok:false, message:'Identity verification is required: choose PRESENT VALID ID or NO VALID ID AVAILABLE.' };
 }
 
-function _tryAutoLogVisitor(){
-    var st = visitorRegistrationState;
-    if(st.logged || st.autoLogInProgress || visitorAutoLogInProgress) return;
-    if(!st.qr){ return; }
-    if(!st.reason){
-        if(st.faceDetected) setVisitorFlowStatus('Face detected. Please select a <b>Reason for Visit</b> to log automatically.', '');
-        return;
-    }
-    if(st.mode === 'NEW' || st.requiresIdRecheck){
-        var g = _validateVisitorIdentityForLogging(st);
-        if(!g.ok){ setVisitorFlowStatus('\u26a0 ' + g.message, 'warn'); return; }
-    }
-    if(!st.name){
-        setVisitorFlowStatus('\u26a0 Visitor identity not established yet.', 'warn');
-        return;
-    }
-    if(!st.faceDetected || !st.faceDescriptor){
-        setVisitorFlowStatus('\u26a0 <b>FACE REQUIRED</b><br>Please look at the camera. The visitor will be logged automatically once the face is detected.', 'warn');
-        return;
-    }
-    autoLogVisitorAfterReason();
-}
-
-async function autoLogVisitorAfterReason(){
-    var st = visitorRegistrationState;
-    if(st.logged || visitorAutoLogInProgress) return;
-    visitorAutoLogInProgress = true;
-    st.autoLogInProgress = true;
-    try {
-        setVisitorFlowStatus('\u23f3 Verifying visitor\u2026', '');
-        // Re-validate every condition at execution time.
-        if(!st.qr || !st.reason || !st.name || !st.faceDetected || !st.faceDescriptor){
-            setVisitorFlowStatus('\u26a0 Visitor could not be verified yet. Waiting\u2026', 'warn');
-            return;
-        }
-        if(st.mode === 'NEW' || st.requiresIdRecheck){
-            var guard = _validateVisitorIdentityForLogging(st);
-            if(!guard.ok){ setVisitorFlowStatus('\u26a0 ' + guard.message, 'warn'); return; }
-        }
-        if(isDupBlocked(st.qr)){ dupBlockToast(); return; }
-        var already = logs.filter(function(l){
-            return l.id === st.qr && l.category === 'VISITOR' && !l.timeout;
-        });
-        if(already.length){
-            setVisitorFlowStatus('\u26a0 This visitor already has an open TIME-IN record.', 'warn');
-            return;
-        }
-
-        var faceImage = _captureVisitorPhoto() || st.faceImage;
-        if(st.mode === 'NEW' && !st.faceRegistered){
-            setVisitorFlowStatus('\u23f3 Registering face\u2026', '');
-            await new Promise(function(r){ setTimeout(r, 60); });
-            st.faceRegistered = true;
-        }
-
-        setVisitorFlowStatus('\u23f3 Saving visitor log\u2026', '');
-        var rec = saveVisitorLog({
-            id: st.qr,
-            name: st.name,
-            reason: st.reason,
-            face: faceImage,
-            faceDescriptor: st.faceDescriptor,
-            idNumber: st.idNumber,
-            idType: st.idType,
-            idSource: st.idSource,
-            mode: st.mode,
-            identityVerificationMethod: st.identityVerificationMethod,
-            nameSource: st.nameSource,
-            requireIdentity: st.requiresIdRecheck === true,
-            idVerified: st.idVerified === true,
-            manualNoId: st.manualNoId === true,
-            ocrConfidence: st.ocrConfidence,
-            confirmedFrames: st.confirmedFrames,
-            idVerificationEvidence: st.idVerificationEvidence,
-            nameEdited: st.nameEdited === true,
-            nameEditedAt: st.nameEditedAt || ''
-        });
-        if(!rec) return;
-
-        st.logged = true;
-        setVisitorFlowStatus(
-            '\u2713 <b>VISITOR LOGGED</b><br>' + rec.name +
-            '<br>Reason: ' + rec.reason + '<br>Time In: ' + rec.timein, 'ok');
-        toast('\u2705 ' + rec.name + ' \u2014 TIME IN at ' + rec.timein, 'green');
-        setTimeout(finishVisitorSession, 1800);
-    } catch(err){
-        console.warn('[visitor] auto-log failed', err);
-        setVisitorFlowStatus('\u274c Automatic logging failed: ' + (err && err.message ? err.message : err), 'err');
-    } finally {
-        st.autoLogInProgress = false;
-        if(!st.logged) visitorAutoLogInProgress = false;
-    }
+/* Kept as a legacy no-op: guard logging is deliberately manual now. */
+function _tryAutoLogVisitor(){ _updateVisitorCaptureButton(); }
+async function captureAndLogVisitor(){
+    var st=visitorRegistrationState;
+    _updateVisitorCaptureButton();
+    var button=document.getElementById('visitorCaptureBtn');
+    if(!button||button.disabled||st.captureBusy||st.logged)return;
+    var video=document.getElementById('visitorCamera');
+    if(!video||!video.videoWidth||video.paused)return;
+    st.captureBusy=true;_updateVisitorCaptureButton();
+    try{
+        // A fresh detection is MANDATORY at click time. A previous saved face
+        // or stale detection must never enable a successful capture.
+        var dets=await faceapi.detectAllFaces(video,new faceapi.TinyFaceDetectorOptions({inputSize:_isMobileDevice?224:320,scoreThreshold:_isMobileDevice?0.42:0.50}))
+                   .withFaceLandmarks().withFaceDescriptors();
+        if(!dets||dets.length!==1||!dets[0].descriptor||dets[0].descriptor.length!==128)
+            throw new Error('Exactly one live face is required. Please try again.');
+        if(!visitorStream||!visitorStream.active||video.paused||
+           Date.now()-(st.faceSeenAt||0)>1800)throw new Error('Live camera face was lost. Please try again.');
+        if(st.faceDescriptor&&_euclidean(dets[0].descriptor,st.faceDescriptor)>0.42)
+            throw new Error('The face changed. Please look at the camera again.');
+        var img=_captureVisitorPhoto();
+        if(!img||!img.startsWith('data:image/'))throw new Error('Visitor photo capture failed.');
+        var name=String(document.getElementById('visitorName').value||'').trim();
+        var reason=String(st.reason||'').trim();
+        if(name.length<4||reason.length<2)throw new Error('Complete Name and Reason are required.');
+        if(!st.commitRequestId)st.commitRequestId=(window.QLogCentral&&QLogCentral.newSyncId)?QLogCentral.newSyncId():'SYNC-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+        setVisitorFlowStatus('⏳ Saving visitor to Central Hub…','');
+        var result=await QLogCentral.visitorCheckIn({qr:st.qr,name:name,reason:reason,
+            photo:img,faceDescriptor:Array.from(dets[0].descriptor),
+            visitorProfileId:/^VISP-[0-9a-f-]{36}$/i.test(st.faceMatchedIdentityId||'')?st.faceMatchedIdentityId:'',
+            syncId:st.commitRequestId});
+        var rec=Object.assign({},result.record||{});
+        if(!rec._syncId)throw new Error('Central did not return a saved visit.');
+        // Central has ALREADY committed. Local storage is just an offline mirror.
+        var oldIndex=logs.findIndex(function(x){return x._syncId===rec._syncId;});
+        var localRec=Object.assign({},rec,{face:img});
+        if(oldIndex>=0)logs[oldIndex]=localRec;else logs.push(localRec);
+        try{saveAll();}catch(e){console.warn('[visitor] Central committed; local cache unavailable',e);}
+        st.logged=true;
+        _guardVisitorQrCooldown[st.qr]=Date.now()+8000; // held QR must not instantly TIME OUT
+        setVisitorFlowStatus('✓ VISITOR LOGGED: '+String(rec.name||name)+' — '+String(rec.timein||''),'ok');
+        toast('✅ '+String(rec.name||name)+' — TIME IN at '+String(rec.timein||''),'green');
+        try{renderLogs();}catch(_){}
+        if(window.QLogCentral&&QLogCentral.syncDatasetsNow)QLogCentral.syncDatasetsNow(['logs']).catch(function(){});
+        setTimeout(finishVisitorSession,1300);
+    }catch(e){
+        setVisitorFlowStatus('❌ '+String(e&&e.message||'Unable to save visitor')+' — correct and retry.','err');
+        toast('Visitor save failed: '+String(e&&e.message||e),'red');
+    }finally{st.captureBusy=false;_updateVisitorCaptureButton();}
 }
 
 /* THE single authoritative visitor logging routine. */
@@ -2529,8 +2401,14 @@ function saveVisitorLog(data){
     }
 }
 
+function cancelVisitorRegistration(){
+    if(visitorRegistrationState.captureBusy)return;
+    finishVisitorSession(true);
+    toast('Visitor registration cancelled. QR is still available.','yellow');
+}
+
 /* Full reset so nothing leaks into the next visitor session. */
-function finishVisitorSession(){
+function finishVisitorSession(cancelled){
     try { closeValidIdScreen(); } catch(e){}
     try { stopVisitorCamera(); } catch(e){}
     visitorRegistrationState.identityVerificationMethod = null;
@@ -2542,11 +2420,13 @@ function finishVisitorSession(){
     pendingVisitorQR = '';
     resetVisitorRegistrationState();
     setVisitorFlowStatus('Waiting for a visitor QR scan\u2026', '');
+    var pass=document.getElementById('visitorQrDisplay');if(pass)pass.textContent='—';
+    _updateVisitorCaptureButton();
     try { hideVisitorTab(); showTab('live', document.querySelector('.nav button:nth-child(1)')); } catch(e){}
     try { renderLogs(); } catch(e){}
     try {
         var scanMsg = document.getElementById('scanMsg');
-        if(scanMsg){ scanMsg.innerHTML = '\u2705 VISITOR LOGGED IN'; scanMsg.style.color = '#16a34a'; }
+        if(scanMsg){scanMsg.textContent = cancelled?'Visitor registration cancelled. Ready to scan.':'✅ VISITOR LOGGED IN';scanMsg.style.color=cancelled?'#64748b':'#16a34a';}
         if(scannerInput){ scannerInput.value = ''; if(currentScanMode === 'USB') scannerInput.focus(); }
     } catch(e){}
 }
@@ -2665,6 +2545,8 @@ window.addEventListener('load', function(){
 Object.assign(window,{
   startVisitorSession:startVisitorSession,startVisitorCamera:startVisitorCamera,stopVisitorCamera:stopVisitorCamera,
   onVisitorNameInput:onVisitorNameInput,onVisitorReasonChanged:onVisitorReasonChanged,
+  captureAndLogVisitor:captureAndLogVisitor,handleGuardVisitorQRScan:handleGuardVisitorQRScan,
+  cancelVisitorRegistration:cancelVisitorRegistration,
   chooseValidIdVerification:chooseValidIdVerification,chooseNoValidId:chooseNoValidId,
   confirmNoIdManualEntry:confirmNoIdManualEntry,backToIdentityChoice:backToIdentityChoice,
   retryIdScan:retryIdScan,rescanValidId:rescanValidId,switchToManualNoId:switchToManualNoId,
